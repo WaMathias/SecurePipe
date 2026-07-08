@@ -121,7 +121,6 @@ async fn handle_connection(
 }
 
 /// Parse, verify, replay-check, and decrypt a raw frame.
-/// All errors are logged as security events - nothing leaks to the sender.
 fn process_frame(
     raw: &[u8],
     replay_guard: &mut ReplayGuard,
@@ -200,7 +199,7 @@ fn process_frame(
         reading.sequence_nr,
     );
 
-    // Broadcast to dashboard (ignore if no subscribers)
+    // Broadcast to dashboard
     let _ = state.readings_tx.send(reading);
 }
 
