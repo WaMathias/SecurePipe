@@ -16,38 +16,26 @@ name = "securepipe"
 path = "src/lib.rs"
 
 [dependencies]
-# Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# Kryptographie - AES-GCM, ECDH, HKDF
 ring = "0.17"
 
-# Serialisierung / Deserialisierung
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# HTTP-Server für Dashboard-API
 axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 
-# Datenbank
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "chrono"] }
-
-# Zeit
 chrono = { version = "0.4", features = ["serde"] }
 
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Fehlerbehandlung
 thiserror = "1"
 anyhow = "1"
 
-# Zufallszahlen
 rand = "0.8"
 
-# Stream-Kombinatoren (für SSE-Merge)
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }

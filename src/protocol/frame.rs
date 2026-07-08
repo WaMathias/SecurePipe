@@ -216,3 +216,123 @@ pub fn crc16(data: &[u8]) -> u16 {
     }
     crc
 }
+
+// ============================================================
+// Unit tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_valid_raw_frame(payload_len: usize) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&MAGIC);
+        raw.push(PROTOCOL_VERSION);
+        raw.extend_from_slice(&1u32.to_be_bytes());          // device_id
+        raw.extend_from_slice(&1u32.to_be_bytes());          // sequence_nr
+        raw.extend_from_slice(&1_700_000_000u64.to_be_bytes()); // timestamp
+        raw.extend_from_slice(&(payload_len as u32).to_be_bytes());
+        raw.extend_from_slice(&[0xAB; NONCE_SIZE]);          // nonce
+        raw.extend_from_slice(&vec![0xCC; payload_len]);     // fake encrypted payload
+        raw.extend_from_slice(&[0xDD; AUTH_TAG_SIZE]);       // fake auth tag
+        raw
+    }
+
+    #[test]
+    fn crc16_known_vector() {
+        // "123456789" -> well-known CRC-16/CCITT-FALSE test vector
+        let crc = crc16(b"123456789");
+        assert_eq!(crc, 0x29B1);
+    }
+
+    #[test]
+    fn crc16_changes_on_single_bit_flip() {
+        let original = crc16(&[0x01, 0x02, 0x03]);
+        let flipped  = crc16(&[0x01, 0x02, 0x02]); // last bit different
+        assert_ne!(original, flipped);
+    }
+
+    #[test]
+    fn parse_valid_frame_succeeds() {
+        let raw = build_valid_raw_frame(PAYLOAD_SIZE);
+        let frame = SecurePipeFrame::parse(&raw).expect("should parse");
+
+        assert_eq!(frame.device_id, 1);
+        assert_eq!(frame.sequence_nr, 1);
+        assert_eq!(frame.timestamp, 1_700_000_000);
+        assert_eq!(frame.encrypted_payload.len(), PAYLOAD_SIZE);
+    }
+
+    #[test]
+    fn parse_rejects_bad_magic() {
+        let mut raw = build_valid_raw_frame(PAYLOAD_SIZE);
+        raw[0] = 0x00; // corrupt magic
+        let result = SecurePipeFrame::parse(&raw);
+        assert!(matches!(result, Err(SecurePipeError::InvalidMagic)));
+    }
+
+    #[test]
+    fn parse_rejects_unsupported_version() {
+        let mut raw = build_valid_raw_frame(PAYLOAD_SIZE);
+        raw[2] = 0x99; // bogus version
+        let result = SecurePipeFrame::parse(&raw);
+        assert!(matches!(result, Err(SecurePipeError::UnsupportedVersion(0x99))));
+    }
+
+    #[test]
+    fn parse_rejects_truncated_frame() {
+        let raw = build_valid_raw_frame(PAYLOAD_SIZE);
+        let truncated = &raw[0..raw.len() - 10]; // cut off the end
+        let result = SecurePipeFrame::parse(truncated);
+        assert!(matches!(result, Err(SecurePipeError::FrameTooShort { .. })));
+    }
+
+    #[test]
+    fn parse_rejects_frame_below_minimum_size() {
+        let raw = vec![0x53, 0x50, 0x01]; // way too short
+        let result = SecurePipeFrame::parse(&raw);
+        assert!(matches!(result, Err(SecurePipeError::FrameTooShort { .. })));
+    }
+
+    #[test]
+    fn header_as_aad_is_deterministic() {
+        let raw = build_valid_raw_frame(PAYLOAD_SIZE);
+        let frame = SecurePipeFrame::parse(&raw).unwrap();
+        let aad1 = frame.header_as_aad();
+        let aad2 = frame.header_as_aad();
+        assert_eq!(aad1, aad2);
+        assert_eq!(aad1.len(), HEADER_SIZE);
+    }
+
+    #[test]
+    fn sensor_payload_parse_valid() {
+        let mut payload = [0u8; PAYLOAD_SIZE];
+        payload[0] = SENSOR_TEMPERATURE;
+        let value: i32 = 2137;
+        payload[1..5].copy_from_slice(&value.to_be_bytes());
+        payload[5] = UNIT_CELSIUS;
+        let crc = crc16(&payload[0..6]);
+        payload[6..8].copy_from_slice(&crc.to_be_bytes());
+
+        let parsed = SensorPayload::parse(&payload).expect("should parse");
+        assert_eq!(parsed.sensor_type, SENSOR_TEMPERATURE);
+        assert_eq!(parsed.value_raw, 2137);
+        assert!((parsed.value_f32() - 21.37).abs() < 0.001);
+        assert_eq!(parsed.sensor_type_str(), "temperature");
+        assert_eq!(parsed.unit_str(), "°C");
+    }
+
+    #[test]
+    fn sensor_payload_rejects_bad_crc() {
+        let mut payload = [0u8; PAYLOAD_SIZE];
+        payload[0] = SENSOR_TEMPERATURE;
+        let value: i32 = 2137;
+        payload[1..5].copy_from_slice(&value.to_be_bytes());
+        payload[5] = UNIT_CELSIUS;
+        payload[6..8].copy_from_slice(&[0xFF, 0xFF]); // wrong CRC
+
+        let result = SensorPayload::parse(&payload);
+        assert!(matches!(result, Err(SecurePipeError::AuthTagInvalid)));
+    }
+}

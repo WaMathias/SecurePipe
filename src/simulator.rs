@@ -18,7 +18,7 @@ use tokio::time::{sleep, Duration};
 // Import protocol and crypto from the main crate
 use securepipe::crypto::aes_gcm::{encrypt_payload, SessionKey};
 use securepipe::protocol::frame::{
-    SecurePipeFrame, SensorPayload, MAGIC, PROTOCOL_VERSION,
+    MAGIC, PROTOCOL_VERSION,
     SENSOR_TEMPERATURE, UNIT_CELSIUS,
 };
 
@@ -82,8 +82,7 @@ fn build_frame(key: &SessionKey, device_id: u32, sequence_nr: u32, temp_raw: i32
         .unwrap()
         .as_secs();
 
-    // Random nonce - in production use rand::thread_rng()
-    // Here we derive from sequence_nr for reproducibility
+    // Random nonce - later in production use rand::thread_rng()
     let mut nonce = [0u8; 12];
     nonce[0..4].copy_from_slice(&sequence_nr.to_be_bytes());
     nonce[4..8].copy_from_slice(&timestamp.to_be_bytes()[4..]);
@@ -108,10 +107,8 @@ fn build_frame(key: &SessionKey, device_id: u32, sequence_nr: u32, temp_raw: i32
     header.extend_from_slice(&payload_len.to_be_bytes());
     header.extend_from_slice(&nonce);
 
-    // Encrypt payload (AES-GCM appends 16-byte auth tag)
     let encrypted = encrypt_payload(key, &nonce, &header, &payload).unwrap();
 
-    // Assemble final frame
     let mut frame = header;
     frame.extend_from_slice(&encrypted);
     frame

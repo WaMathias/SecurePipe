@@ -108,3 +108,123 @@ pub fn encrypt_payload(
 
     Ok(in_out)
 }
+
+// ============================================================
+// Unit tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::frame::AUTH_TAG_SIZE;
+    use super::*;
+
+    fn test_key() -> SessionKey {
+        SessionKey::dev_test_key()
+    }
+
+    fn test_nonce(byte: u8) -> [u8; NONCE_SIZE] {
+        [byte; NONCE_SIZE]
+    }
+
+    #[test]
+    fn encrypt_then_decrypt_roundtrip() {
+        let key = test_key();
+        let nonce = test_nonce(0x01);
+        let aad = b"header_data_here";
+        let plaintext = b"temperature: 21.37C";
+
+        let ciphertext = encrypt_payload(&key, &nonce, aad, plaintext).unwrap();
+        // Ciphertext should be plaintext_len + 16 (auth tag)
+        assert_eq!(ciphertext.len(), plaintext.len() + AUTH_TAG_SIZE);
+
+        let decrypted = decrypt_payload(&key, &nonce, aad, &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn decryption_fails_with_wrong_key() {
+        let key1 = test_key();
+        let key2 = SessionKey::from_bytes([0xFFu8; 32]);
+        let nonce = test_nonce(0x01);
+        let aad = b"header";
+        let plaintext = b"secret data";
+
+        let ciphertext = encrypt_payload(&key1, &nonce, aad, plaintext).unwrap();
+        let result = decrypt_payload(&key2, &nonce, aad, &ciphertext);
+
+        assert!(matches!(result, Err(SecurePipeError::AuthTagInvalid)));
+    }
+
+    #[test]
+    fn decryption_fails_with_tampered_ciphertext() {
+        let key = test_key();
+        let nonce = test_nonce(0x01);
+        let aad = b"header";
+        let plaintext = b"original message";
+
+        let mut ciphertext = encrypt_payload(&key, &nonce, aad, plaintext).unwrap();
+        // Flip one bit in the ciphertext - simulates an attacker tampering in transit
+        ciphertext[0] ^= 0x01;
+
+        let result = decrypt_payload(&key, &nonce, aad, &ciphertext);
+        assert!(matches!(result, Err(SecurePipeError::AuthTagInvalid)));
+    }
+
+    #[test]
+    fn decryption_fails_with_tampered_aad() {
+        let key = test_key();
+        let nonce = test_nonce(0x01);
+        let aad = b"original_header";
+        let plaintext = b"some payload";
+
+        let ciphertext = encrypt_payload(&key, &nonce, aad, plaintext).unwrap();
+
+        // Attacker modifies the header (AAD) without touching ciphertext
+        let tampered_aad = b"tampered_header!";
+        let result = decrypt_payload(&key, &nonce, tampered_aad, &ciphertext);
+
+        assert!(matches!(result, Err(SecurePipeError::AuthTagInvalid)));
+    }
+
+    #[test]
+    fn decryption_fails_with_wrong_nonce() {
+        let key = test_key();
+        let nonce1 = test_nonce(0x01);
+        let nonce2 = test_nonce(0x02);
+        let aad = b"header";
+        let plaintext = b"payload data";
+
+        let ciphertext = encrypt_payload(&key, &nonce1, aad, plaintext).unwrap();
+        let result = decrypt_payload(&key, &nonce2, aad, &ciphertext);
+
+        assert!(matches!(result, Err(SecurePipeError::AuthTagInvalid)));
+    }
+
+    #[test]
+    fn same_plaintext_different_nonce_produces_different_ciphertext() {
+        let key = test_key();
+        let aad = b"header";
+        let plaintext = b"identical message";
+
+        let ciphertext1 = encrypt_payload(&key, &test_nonce(0x01), aad, plaintext).unwrap();
+        let ciphertext2 = encrypt_payload(&key, &test_nonce(0x02), aad, plaintext).unwrap();
+
+        // Critical security property: same plaintext must never produce
+        // the same ciphertext when nonces differ
+        assert_ne!(ciphertext1, ciphertext2);
+    }
+
+    #[test]
+    fn truncated_ciphertext_fails_to_decrypt() {
+        let key = test_key();
+        let nonce = test_nonce(0x01);
+        let aad = b"header";
+        let plaintext = b"payload";
+
+        let mut ciphertext = encrypt_payload(&key, &nonce, aad, plaintext).unwrap();
+        ciphertext.truncate(ciphertext.len() - 5); // cut off part of the auth tag
+
+        let result = decrypt_payload(&key, &nonce, aad, &ciphertext);
+        assert!(result.is_err());
+    }
+}

@@ -17,7 +17,6 @@ use axum::routing::get;
 use axum::Router;
 use futures::stream::{self, Stream};
 use serde_json::json;
-use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
@@ -33,10 +32,9 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
         .with_state(state)
 }
 
-// ============================================================
-// SSE stream - combines readings and security events
-// ============================================================
 
+
+// SSE stream - combines readings and security events
 #[derive(serde::Serialize)]
 #[serde(tag = "type", content = "data")]
 enum SsePayload {

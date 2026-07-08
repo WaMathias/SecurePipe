@@ -1,7 +1,3 @@
-// ============================================================
-// SecurePipe Gateway - main entry point
-// ============================================================
-
 mod api;
 mod crypto;
 mod error;
@@ -22,7 +18,6 @@ const HTTP_BIND: &str = "0.0.0.0:8080";
 
 #[tokio::main]
 async fn main() {
-    // Initialize structured logging
     // Set RUST_LOG=debug for verbose output, default is info
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env()
@@ -52,7 +47,6 @@ async fn main() {
         }
     });
 
-    // Start HTTP server (serves dashboard + SSE stream)
     let router = build_router(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind(HTTP_BIND).await.unwrap();
     info!("Dashboard available at http://localhost:8080");

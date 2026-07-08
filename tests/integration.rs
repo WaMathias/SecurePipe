@@ -121,10 +121,6 @@ fn full_pipeline_multiple_devices_independent() {
     assert!(process_frame(&raw_device2, &key, &mut guard).is_ok());
 }
 
-// ============================================================
-// The central security demo: replay attack
-// ============================================================
-
 #[test]
 fn replay_attack_is_detected_and_rejected() {
     let key = SessionKey::dev_test_key();
@@ -140,7 +136,6 @@ fn replay_attack_is_detected_and_rejected() {
         assert!(process_frame(&raw, &key, &mut guard).is_ok());
     }
 
-    // ATTACK: attacker captured frame #1 and replays it now
     let result = process_frame(&frame1, &key, &mut guard);
 
     assert!(result.is_err());
@@ -158,9 +153,6 @@ fn replay_with_reused_nonce_is_detected() {
     // First frame establishes nonce 0x42 as seen
     let frame1 = build_test_frame(&key, 1, 1, now(), 0x42, 2137);
     assert!(process_frame(&frame1, &key, &mut guard).is_ok());
-
-    // Attacker crafts a NEW frame with a HIGHER sequence number
-    // but reuses the same nonce - this must still be rejected
     let frame_reused_nonce = build_test_frame(&key, 1, 2, now(), 0x42, 9999);
     let result = process_frame(&frame_reused_nonce, &key, &mut guard);
 
@@ -178,7 +170,6 @@ fn tampered_payload_is_rejected_before_replay_check() {
 
     let mut raw = build_test_frame(&key, 1, 1, now(), 0x01, 2137);
 
-    // Flip a bit in the encrypted payload (somewhere after the 35-byte header)
     let tamper_index = HEADER_SIZE + 2;
     raw[tamper_index] ^= 0xFF;
 
@@ -193,8 +184,6 @@ fn tampered_sequence_number_in_header_is_rejected() {
 
     let mut raw = build_test_frame(&key, 1, 1, now(), 0x01, 2137);
 
-    // Attacker tries to change the sequence number in the header.
-    // Since the header is part of the AAD, this invalidates the auth tag.
     raw[10] ^= 0x01; // last byte of sequence_nr field
 
     let result = process_frame(&raw, &key, &mut guard);
@@ -222,7 +211,7 @@ fn stale_frame_is_rejected() {
     let key = SessionKey::dev_test_key();
     let mut guard = ReplayGuard::new();
 
-    let old_timestamp = now() - 120; // 2 minutes old, well past the 30s window
+    let old_timestamp = now() - 120;
     let raw = build_test_frame(&key, 1, 1, old_timestamp, 0x01, 2137);
 
     let result = process_frame(&raw, &key, &mut guard);
@@ -241,7 +230,7 @@ fn garbage_bytes_are_rejected_without_panic() {
     let garbage = vec![0x00, 0xFF, 0x42, 0x13, 0x37];
     let result = process_frame(&garbage, &key, &mut guard);
 
-    assert!(result.is_err()); // must fail gracefully, never panic
+    assert!(result.is_err()); 
 }
 
 #[test]
