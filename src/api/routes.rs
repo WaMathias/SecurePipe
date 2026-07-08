@@ -85,10 +85,6 @@ async fn status() -> impl IntoResponse {
     }))
 }
 
-// ============================================================
-// Dashboard HTML - served inline, no separate file needed
-// ============================================================
-
 async fn dashboard_html() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
 }

@@ -13,10 +13,7 @@ use ring::error::Unspecified;
 use crate::error::{Result, SecurePipeError};
 use crate::protocol::frame::NONCE_SIZE;
 
-// ============================================================
 // Session key - wraps a 32-byte AES-256 key
-// ============================================================
-
 #[derive(Clone)]
 pub struct SessionKey(pub [u8; 32]);
 
@@ -85,7 +82,6 @@ pub fn decrypt_payload(
 }
 
 /// Encrypts a payload and appends the authentication tag.
-/// Used by the test simulator to generate valid frames.
 pub fn encrypt_payload(
     key: &SessionKey,
     nonce: &[u8; NONCE_SIZE],
@@ -210,7 +206,6 @@ mod tests {
         let ciphertext2 = encrypt_payload(&key, &test_nonce(0x02), aad, plaintext).unwrap();
 
         // Critical security property: same plaintext must never produce
-        // the same ciphertext when nonces differ
         assert_ne!(ciphertext1, ciphertext2);
     }
 

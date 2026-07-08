@@ -1,10 +1,10 @@
 // ============================================================
-// SecurePipe Protocol v1 - Frame definitions and constants
+// SecurePipe Protocol
 // ============================================================
 
 use crate::error::{Result, SecurePipeError};
 
-// Magic bytes: "SP" in ASCII - identify a SecurePipe frame
+// Magic bytes: "SP" in ASCII - identify a frame
 pub const MAGIC: [u8; 2] = [0x53, 0x50];
 
 // Magic bytes for handshake frames: "SH" in ASCII
@@ -55,7 +55,7 @@ pub const MAX_FRAME_AGE_SECS: u64 = 30;
 pub const NONCE_CACHE_SIZE: usize = 64;
 
 // ============================================================
-// SecurePipeFrame - the parsed, not-yet-decrypted frame
+// parsed, not-yet-decrypted frame
 // ============================================================
 
 #[derive(Debug, Clone)]
@@ -143,7 +143,7 @@ impl SecurePipeFrame {
 }
 
 // ============================================================
-// SensorPayload - the decrypted, parsed sensor data
+// SensorPayload - decrypted, parsed sensor data
 // ============================================================
 
 #[derive(Debug, Clone)]
