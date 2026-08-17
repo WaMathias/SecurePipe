@@ -2,12 +2,14 @@
 // SecurePipe - TCP Transport Layer
 // ============================================================
 // Accepts incoming TCP connections from ESP32 devices.
-// Each connection gets its own task and replay guard.
+// Each connection gets its own task, but replay protection and the
+// device whitelist are shared gateway-wide (see GatewayState) so they
+// keep working correctly across reconnects.
 // The transport layer is deliberately thin - it only handles
 // bytes on the wire. All protocol logic lives in the
 // protocol and crypto modules.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -16,8 +18,9 @@ use tracing::{error, info, warn};
 use crate::crypto::aes_gcm::{decrypt_payload, SessionKey};
 use crate::error::SecurePipeError;
 use crate::protocol::frame::{
-    SecurePipeFrame, SensorPayload, AUTH_TAG_SIZE, HEADER_SIZE, MIN_FRAME_SIZE,
+    SecurePipeFrame, SensorPayload, AUTH_TAG_SIZE, HEADER_SIZE, MAX_PAYLOAD_SIZE,
 };
+use crate::protocol::registry::DeviceRegistry;
 use crate::protocol::replay::ReplayGuard;
 
 // Shared sensor reading - broadcast to all dashboard clients
@@ -43,6 +46,12 @@ pub struct GatewayState {
     pub key: SessionKey,
     pub readings_tx: broadcast::Sender<SensorReading>,
     pub events_tx: broadcast::Sender<SecurityEvent>,
+    /// Shared across ALL connections, keyed by device_id - not per-connection.
+    /// A per-connection guard would forget everything on reconnect (WiFi
+    /// drops are routine for ESP32 devices), silently reopening the replay
+    /// window right after every reconnect. See docs/SECURITY.md.
+    pub replay_guard: Mutex<ReplayGuard>,
+    pub device_registry: DeviceRegistry,
 }
 
 /// Start the TCP listener. Spawns a new task per connection.
@@ -78,8 +87,6 @@ async fn handle_connection(
     mut stream: TcpStream,
     state: Arc<GatewayState>,
 ) -> Result<(), SecurePipeError> {
-    let mut replay_guard = ReplayGuard::new();
-
     loop {
         // Read the fixed header first to know the payload length
         let mut header_buf = [0u8; HEADER_SIZE];
@@ -103,9 +110,34 @@ async fn handle_connection(
             continue;
         }
 
-        // Extract payload length from header
+        // Extract payload length from header - this field is attacker
+        // controlled and NOT yet authenticated (the auth tag hasn't been
+        // checked yet). Cap it BEFORE allocating anything of that size,
+        // otherwise a peer can declare a multi-gigabyte length and force
+        // an allocation of that size on every single frame (memory-
+        // exhaustion DoS). See docs/SECURITY.md.
         let payload_len =
             u32::from_be_bytes(header_buf[19..23].try_into().unwrap()) as usize;
+
+        if payload_len > MAX_PAYLOAD_SIZE {
+            warn!(
+                "Declared payload length {} exceeds max {} - closing connection",
+                payload_len, MAX_PAYLOAD_SIZE
+            );
+            emit_security_event(
+                &state,
+                None,
+                "payload_too_large",
+                &format!(
+                    "declared payload length {} exceeds max {}",
+                    payload_len, MAX_PAYLOAD_SIZE
+                ),
+            );
+            return Err(SecurePipeError::PayloadTooLarge {
+                max: MAX_PAYLOAD_SIZE,
+                got: payload_len,
+            });
+        }
 
         // Read remaining bytes: payload + auth tag
         let remaining = payload_len + AUTH_TAG_SIZE;
@@ -116,16 +148,12 @@ async fn handle_connection(
         let mut full_frame = header_buf.to_vec();
         full_frame.extend_from_slice(&rest_buf);
 
-        process_frame(&full_frame, &mut replay_guard, &state);
+        process_frame(&full_frame, &state);
     }
 }
 
-/// Parse, verify, replay-check, and decrypt a raw frame.
-fn process_frame(
-    raw: &[u8],
-    replay_guard: &mut ReplayGuard,
-    state: &Arc<GatewayState>,
-) {
+/// Parse, verify, whitelist-check, replay-check, and decrypt a raw frame.
+fn process_frame(raw: &[u8], state: &Arc<GatewayState>) {
     // Step 1: Parse frame structure
     let frame = match SecurePipeFrame::parse(raw) {
         Ok(f) => f,
@@ -160,19 +188,37 @@ fn process_frame(
         }
     };
 
-    // Step 3: Replay check (after auth tag - never process unauthenticated data)
-    if let Err(e) = replay_guard.check(
-        device_id,
-        frame.sequence_nr,
-        frame.timestamp,
-        &frame.nonce,
-    ) {
-        warn!("Replay detected for device {}: {}", device_id, e);
-        emit_security_event(state, Some(device_id), "replay_detected", &e.to_string());
+    // Step 3: Device whitelist check (after auth tag, before replay state
+    // is touched - an unlisted device shouldn't even get an entry in the
+    // replay guard's per-device map).
+    if !state.device_registry.is_allowed(device_id) {
+        warn!("Device {:08X} is not on the allowed-devices list", device_id);
+        emit_security_event(
+            state,
+            Some(device_id),
+            "unknown_device",
+            "Frame rejected: device_id not on whitelist",
+        );
         return;
     }
 
-    // Step 4: Parse decrypted sensor payload
+    // Step 4: Replay check (after auth tag - never process unauthenticated
+    // data). Shared, device_id-keyed guard - survives reconnects.
+    {
+        let mut replay_guard = state.replay_guard.lock().unwrap();
+        if let Err(e) = replay_guard.check(
+            device_id,
+            frame.sequence_nr,
+            frame.timestamp,
+            &frame.nonce,
+        ) {
+            warn!("Replay detected for device {}: {}", device_id, e);
+            emit_security_event(state, Some(device_id), "replay_detected", &e.to_string());
+            return;
+        }
+    }
+
+    // Step 5: Parse decrypted sensor payload
     let sensor = match SensorPayload::parse(&plaintext) {
         Ok(s) => s,
         Err(e) => {

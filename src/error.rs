@@ -11,6 +11,12 @@ pub enum SecurePipeError {
     #[error("Frame too short: expected {expected} bytes, got {got}")]
     FrameTooShort { expected: usize, got: usize },
 
+    #[error("Declared payload length {got} exceeds maximum of {max} bytes - frame rejected before allocation")]
+    PayloadTooLarge { max: usize, got: usize },
+
+    #[error("Device {0:08X} is not on the allowed-devices list - frame rejected")]
+    DeviceNotAllowed(u32),
+
     #[error("Authentication tag verification failed - frame tampered or wrong key")]
     AuthTagInvalid,
 

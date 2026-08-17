@@ -9,35 +9,52 @@
 //   Arduino Pin 3 (TX) -> ESP32 GPIO 16 (RX2)
 //   Arduino GND        -> ESP32 GND
 //
+// Configuration (WiFi + gateway address + device ID) is done at
+// RUNTIME via a captive portal, not baked into this file at compile
+// time - see docs/CONFIGURATION.md for the full walkthrough. Short
+// version:
+//   - First boot (or after a reset): the ESP32 opens a WiFi access
+//     point called "SecurePipe-Setup". Connect to it with your phone,
+//     a config page opens automatically (or go to 192.168.4.1);
+//     enter your WiFi credentials plus the gateway host/port/device ID.
+//   - Every boot after that: it reconnects automatically using the
+//     saved values - no reflashing needed to move the ESP32 from your
+//     PC to a Raspberry Pi, just enter the new gateway IP once.
+//   - To reconfigure later (new WiFi, new gateway IP, ...): hold the
+//     BOOT button (GPIO0) for 3+ seconds while/after powering on -
+//     this wipes the saved config and reopens the setup portal.
+//
 // Libraries needed (install via Arduino Library Manager):
 //   - mbedTLS: built into ESP32 Arduino framework, no install needed
+//   - WiFiManager by tzapu: https://github.com/tzapu/WiFiManager
+//   - Preferences: built into ESP32 Arduino framework, no install needed
 //
 // Board: ESP32 Dev Module (or any ESP32 variant)
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiManager.h>       // tzapu/WiFiManager - captive portal
+#include <Preferences.h>       // built-in NVS storage for custom fields
 #include <time.h>
 #include <mbedtls/gcm.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
 
-// ── WiFi credentials ─────────────────────────────────────────
-// Change these to your network
-#define WIFI_SSID     "YourNetworkName"
-#define WIFI_PASSWORD "YourPassword"
+// ── Config-reset button ──────────────────────────────────────
+// Hold this pin LOW at boot for CONFIG_RESET_HOLD_MS to wipe the
+// saved WiFi + gateway config and reopen the setup portal.
+// GPIO0 is the built-in "BOOT" button on almost every ESP32 dev board.
+#define CONFIG_RESET_PIN       0
+#define CONFIG_RESET_HOLD_MS   3000
 
-// ── Gateway address ──────────────────────────────────────────
-// During development: your computer's local IP
-// Later: Raspberry Pi IP
-#define GATEWAY_HOST  "192.168.1.100"
-#define GATEWAY_PORT  7777
+// How long the setup portal stays open with nobody configuring it
+// before giving up and rebooting to retry (device isn't bricked if
+// left unattended with no saved config yet).
+#define CONFIG_PORTAL_TIMEOUT_SECS  180
 
 // ── UART from Arduino ────────────────────────────────────────
 #define UART_RX_PIN   16    // ESP32 RX2 <- Arduino TX
 #define UART_BAUD     9600
-
-// ── Device identity ──────────────────────────────────────────
-#define DEVICE_ID     0x00000001UL
 
 // ── SecurePipe protocol constants ───────────────────────────
 // Must match Rust gateway exactly
@@ -62,13 +79,34 @@
 #define UNIT_PERCENT        0x02
 
 // ── MVP: hardcoded test key (32 bytes = AES-256) ─────────────
-// MUST match SessionKey::dev_test_key() in Rust exactly
+// MUST match SessionKey::dev_test_key() in Rust exactly.
+// This is still a shared static key for every device (see
+// docs/SECURITY.md, "Phase 2: per-device keys via ECDH") - the
+// captive portal below solves the WiFi/gateway-IP/device-ID
+// hardcoding problem, not the shared-key problem.
 static const uint8_t SESSION_KEY[32] = {
   0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
   0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
   0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
   0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20
 };
+
+// ── Runtime configuration ────────────────────────────────────
+// Loaded from flash (NVS, via Preferences) at boot, and re-entered
+// through the WiFiManager captive portal on first boot or after a
+// config reset. No longer #define'd, no longer requires reflashing
+// to change.
+Preferences prefs;
+WiFiManager wifiManager;
+bool shouldSaveConfig = false;
+
+char gatewayHostBuf[41]  = "192.168.1.100";
+char gatewayPortBuf[6]   = "7777";
+char deviceIdBuf[9]      = "00000001";
+
+char     gatewayHost[41];
+uint16_t gatewayPort = 7777;
+uint32_t deviceId    = 0x00000001UL;
 
 // ── State ─────────────────────────────────────────────────────
 WiFiClient       tcpClient;
@@ -86,6 +124,7 @@ mbedtls_ctr_drbg_context ctrDrbg;
 void setup() {
   Serial.begin(115200);
   arduinoSerial.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, -1);
+  pinMode(CONFIG_RESET_PIN, INPUT_PULLUP);
 
   Serial.println("SecurePipe ESP32 Sender Node");
   Serial.println("Initializing RNG...");
@@ -97,7 +136,9 @@ void setup() {
   mbedtls_ctr_drbg_seed(&ctrDrbg, mbedtls_entropy_func, &entropy,
                          (const unsigned char*)pers, strlen(pers));
 
-  connectWiFi();
+  maybeFactoryReset();
+  setupWiFiAndConfig();
+  syncTime();
   connectGateway();
 }
 
@@ -125,43 +166,128 @@ void loop() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// WiFi connection
+// Hold BOOT (GPIO0) at boot to wipe saved config and force the
+// setup portal to reopen - e.g. when moving the ESP32 from your
+// PC to a Raspberry Pi, or switching WiFi networks.
 // ─────────────────────────────────────────────────────────────
 
-void connectWiFi() {
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(WIFI_SSID);
-
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  uint8_t attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
+void maybeFactoryReset() {
+  if (digitalRead(CONFIG_RESET_PIN) != LOW) {
+    return; // button not held - normal boot
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\nERROR: WiFi connection failed - restarting");
+  Serial.println("BOOT button held at startup - checking for reset...");
+  uint32_t start = millis();
+  while (digitalRead(CONFIG_RESET_PIN) == LOW) {
+    if (millis() - start > CONFIG_RESET_HOLD_MS) {
+      Serial.println("Held long enough - wiping saved WiFi + gateway config.");
+      wifiManager.resetSettings();
+      prefs.begin("securepipe", false);
+      prefs.clear();
+      prefs.end();
+      delay(300);
+      ESP.restart();
+    }
+    delay(50);
+  }
+  Serial.println("Released before timeout - continuing normal boot.");
+}
+
+// Called by WiFiManager the moment the user submits the portal form
+// (whether they entered new WiFi creds, just our custom fields, or
+// both) - custom fields aren't persisted by WiFiManager itself, so
+// this flag tells us to save them ourselves afterwards.
+void onConfigSaved() {
+  shouldSaveConfig = true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// WiFi + gateway config via captive portal (WiFiManager)
+// ─────────────────────────────────────────────────────────────
+// - If WiFi credentials were saved before: connects automatically,
+//   no portal shown, boots in a couple seconds like any normal device.
+// - If not (first boot, or after maybeFactoryReset()): opens an access
+//   point "SecurePipe-Setup"; connecting to it opens a config page
+//   (captive portal) with WiFi selection PLUS our three custom fields
+//   (gateway host, gateway port, device ID).
+// ─────────────────────────────────────────────────────────────
+
+void setupWiFiAndConfig() {
+  // Load previously saved custom values (if any) as the portal's
+  // pre-filled defaults, so re-opening the portal doesn't blank them.
+  prefs.begin("securepipe", true); // read-only
+  String savedHost = prefs.getString("gw_host", gatewayHostBuf);
+  String savedPort = prefs.getString("gw_port", gatewayPortBuf);
+  String savedDevId = prefs.getString("dev_id", deviceIdBuf);
+  prefs.end();
+
+  savedHost.toCharArray(gatewayHostBuf, sizeof(gatewayHostBuf));
+  savedPort.toCharArray(gatewayPortBuf, sizeof(gatewayPortBuf));
+  savedDevId.toCharArray(deviceIdBuf, sizeof(deviceIdBuf));
+
+  WiFiManagerParameter paramHost("gw_host", "Gateway Host / IP", gatewayHostBuf, sizeof(gatewayHostBuf) - 1);
+  WiFiManagerParameter paramPort("gw_port", "Gateway Port", gatewayPortBuf, sizeof(gatewayPortBuf) - 1);
+  WiFiManagerParameter paramDevId("dev_id", "Device ID (8 hex digits)", deviceIdBuf, sizeof(deviceIdBuf) - 1);
+
+  wifiManager.addParameter(&paramHost);
+  wifiManager.addParameter(&paramPort);
+  wifiManager.addParameter(&paramDevId);
+  wifiManager.setSaveConfigCallback(onConfigSaved);
+  wifiManager.setConfigPortalTimeout(CONFIG_PORTAL_TIMEOUT_SECS);
+
+  Serial.println("Starting WiFiManager...");
+  Serial.println("(opens AP 'SecurePipe-Setup' if no WiFi saved yet)");
+
+  bool wifiOk = wifiManager.autoConnect("SecurePipe-Setup");
+
+  if (!wifiOk) {
+    Serial.println("Setup portal timed out with no config - restarting to retry.");
+    delay(1000);
     ESP.restart();
   }
 
-  Serial.println();
   Serial.print("WiFi connected. IP: ");
   Serial.println(WiFi.localIP());
 
-  // Sync time via NTP - required for valid SecurePipe timestamps
-  // The Rust gateway checks timestamps against real Unix time.
-  // Without NTP, millis()/1000 would be rejected as "too old".
+  // Pull the (possibly just-entered) values back out of the parameters
+  strncpy(gatewayHostBuf, paramHost.getValue(), sizeof(gatewayHostBuf) - 1);
+  strncpy(gatewayPortBuf, paramPort.getValue(), sizeof(gatewayPortBuf) - 1);
+  strncpy(deviceIdBuf,    paramDevId.getValue(), sizeof(deviceIdBuf) - 1);
+
+  strncpy(gatewayHost, gatewayHostBuf, sizeof(gatewayHost) - 1);
+  gatewayHost[sizeof(gatewayHost) - 1] = '\0';
+  gatewayPort = (uint16_t) strtoul(gatewayPortBuf, nullptr, 10);
+  deviceId    = (uint32_t) strtoul(deviceIdBuf, nullptr, 16);
+
+  if (shouldSaveConfig) {
+    Serial.println("Saving gateway config to flash...");
+    prefs.begin("securepipe", false);
+    prefs.putString("gw_host", gatewayHostBuf);
+    prefs.putString("gw_port", gatewayPortBuf);
+    prefs.putString("dev_id",  deviceIdBuf);
+    prefs.end();
+  }
+
+  Serial.printf("Config: gateway=%s:%u device_id=0x%08X\n",
+                gatewayHost, gatewayPort, deviceId);
+}
+
+// ─────────────────────────────────────────────────────────────
+// NTP time sync - required for valid SecurePipe timestamps.
+// The Rust gateway checks timestamps against real Unix time; without
+// NTP, millis()/1000 would be rejected as "too old".
+// ─────────────────────────────────────────────────────────────
+
+void syncTime() {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   Serial.print("Waiting for NTP sync");
   time_t now = 0;
-  uint8_t attempts = 0;
-  while (now < 1000000000UL && attempts < 20) {
+  uint8_t ntpAttempts = 0;
+  while (now < 1000000000UL && ntpAttempts < 20) {
     delay(500);
     Serial.print(".");
     time(&now);
-    attempts++;
+    ntpAttempts++;
   }
   if (now > 1000000000UL) {
     Serial.println(" OK");
@@ -176,12 +302,12 @@ void connectWiFi() {
 
 void connectGateway() {
   Serial.print("Connecting to gateway ");
-  Serial.print(GATEWAY_HOST);
+  Serial.print(gatewayHost);
   Serial.print(":");
-  Serial.println(GATEWAY_PORT);
+  Serial.println(gatewayPort);
 
   uint8_t attempts = 0;
-  while (!tcpClient.connect(GATEWAY_HOST, GATEWAY_PORT) && attempts < 10) {
+  while (!tcpClient.connect(gatewayHost, gatewayPort) && attempts < 10) {
     Serial.print(".");
     delay(1000);
     attempts++;
@@ -301,10 +427,10 @@ void buildHeader(uint8_t* out, uint64_t timestamp, uint8_t* nonce, uint32_t payl
   out[2] = SP_VERSION;
 
   // Device ID (big-endian)
-  out[3] = (DEVICE_ID >> 24) & 0xFF;
-  out[4] = (DEVICE_ID >> 16) & 0xFF;
-  out[5] = (DEVICE_ID >>  8) & 0xFF;
-  out[6] = (DEVICE_ID      ) & 0xFF;
+  out[3] = (deviceId >> 24) & 0xFF;
+  out[4] = (deviceId >> 16) & 0xFF;
+  out[5] = (deviceId >>  8) & 0xFF;
+  out[6] = (deviceId      ) & 0xFF;
 
   // Sequence number (big-endian)
   out[7]  = (sequenceNr >> 24) & 0xFF;

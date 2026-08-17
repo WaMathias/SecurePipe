@@ -38,6 +38,16 @@ pub const MIN_FRAME_SIZE: usize = HEADER_SIZE + AUTH_TAG_SIZE;
 //   6- 7  crc16          2 bytes
 pub const PAYLOAD_SIZE: usize = 8;
 
+// Hard upper bound on the payload_len field from an incoming header.
+// Real frames always carry exactly PAYLOAD_SIZE (8) bytes; this cap is
+// generous headroom for future payload types, but its real job is
+// security: payload_len comes straight from an unauthenticated header,
+// so without a cap an attacker can declare a multi-gigabyte length and
+// force the gateway to allocate a buffer for it before any auth check
+// ever runs. Checked in transport::tcp BEFORE that buffer is allocated,
+// and again here in parse() as defense-in-depth for any other caller.
+pub const MAX_PAYLOAD_SIZE: usize = 512;
+
 // Sensor type identifiers
 pub const SENSOR_TEMPERATURE: u8 = 0x01;
 pub const SENSOR_HUMIDITY: u8 = 0x02;
@@ -94,6 +104,13 @@ impl SecurePipeFrame {
         let sequence_nr = u32::from_be_bytes(raw[7..11].try_into().unwrap());
         let timestamp = u64::from_be_bytes(raw[11..19].try_into().unwrap());
         let payload_len = u32::from_be_bytes(raw[19..23].try_into().unwrap()) as usize;
+
+        if payload_len > MAX_PAYLOAD_SIZE {
+            return Err(SecurePipeError::PayloadTooLarge {
+                max: MAX_PAYLOAD_SIZE,
+                got: payload_len,
+            });
+        }
 
         let expected_total = HEADER_SIZE + payload_len + AUTH_TAG_SIZE;
         if raw.len() < expected_total {
@@ -286,6 +303,31 @@ mod tests {
         let truncated = &raw[0..raw.len() - 10]; // cut off the end
         let result = SecurePipeFrame::parse(truncated);
         assert!(matches!(result, Err(SecurePipeError::FrameTooShort { .. })));
+    }
+
+    #[test]
+    fn parse_rejects_oversized_payload_len() {
+        // Header claims a payload far above MAX_PAYLOAD_SIZE.
+        // This must be rejected immediately, based on the header alone -
+        // never by first allocating a buffer of that declared size.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&MAGIC);
+        raw.push(PROTOCOL_VERSION);
+        raw.extend_from_slice(&1u32.to_be_bytes());
+        raw.extend_from_slice(&1u32.to_be_bytes());
+        raw.extend_from_slice(&1_700_000_000u64.to_be_bytes());
+        raw.extend_from_slice(&(u32::MAX).to_be_bytes()); // absurd payload_len
+        raw.extend_from_slice(&[0xAB; NONCE_SIZE]);
+        raw.extend_from_slice(&[0u8; AUTH_TAG_SIZE]); // pad past MIN_FRAME_SIZE
+        // Note: deliberately NOT appending u32::MAX bytes of payload -
+        // the parser must reject based on the header field alone,
+        // before ever looking at how much data actually followed it.
+
+        let result = SecurePipeFrame::parse(&raw);
+        assert!(matches!(
+            result,
+            Err(SecurePipeError::PayloadTooLarge { .. })
+        ));
     }
 
     #[test]

@@ -73,11 +73,17 @@ pub fn decrypt_payload(
 
     let mut in_out = encrypted_payload_with_tag.to_vec();
 
-    opening_key
+    // open_in_place decrypts in place and returns a slice borrowed from
+    // in_out containing ONLY the plaintext - it does not shrink in_out
+    // itself. Take its length and truncate, or callers get the plaintext
+    // with the (still present, just no longer meaningful) tag bytes
+    // trailing it.
+    let plaintext_len = opening_key
         .open_in_place(Aad::from(aad), &mut in_out)
-        .map_err(|_| SecurePipeError::AuthTagInvalid)?;
+        .map_err(|_| SecurePipeError::AuthTagInvalid)?
+        .len();
 
-    // ring removes the auth tag from in_out after verification
+    in_out.truncate(plaintext_len);
     Ok(in_out)
 }
 
