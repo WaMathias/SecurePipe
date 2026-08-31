@@ -315,3 +315,7 @@ Kurzuebersicht - Details in [`docs/SECURITY.md`](docs/SECURITY.md).
 ## Konfigurations-Dokumentation
 
 Details zu allen Einstellungen: [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)
+
+
+## KI-Info
+Code wurde teilweise mit Unterstützung erstellt und zuletzt mit KI angepasst und verbessert.
