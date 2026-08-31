@@ -1,8 +1,8 @@
 // ============================================================
 // SecurePipe - ESP32 Sender Node
 // ============================================================
-// Receives raw sensor frames from Arduino via UART (or reads an
-// HC-SR04 ultrasonic sensor directly via GPIO in "direct" mode),
+// Receives raw sensor frames from Arduino via UART (or reads a
+// TCRT5000 IR proximity sensor directly via GPIO in "direct" mode),
 // builds and encrypts SecurePipe frames (AES-256-GCM),
 // and sends them to the Rust gateway via TCP.
 //
@@ -10,20 +10,21 @@
 //   UART mode  (default): HC-SR04 is wired to an Arduino, which
 //              sends 10-byte raw frames over SoftwareSerial.
 //              ESP32 listens on RX2 (GPIO 16).
-//   Direct mode:          HC-SR04 is wired directly to the ESP32.
+//   Direct mode:          A TCRT5000 IR proximity sensor is wired
+//              directly to the ESP32 (VCC=3V3, GND=GND, DO=GPIO22).
 //              No Arduino needed. Set "Sensor Mode" to "direct"
-//              in the captive portal and configure TRIG/ECHO pins.
-//              ESP32 reads the sensor itself every 500 ms.
+//              in the captive portal. The digital output DO is read
+//              every 500 ms (HIGH = object detected, LOW = none).
 //
 // Wiring (UART mode):
 //   Arduino Pin 3 (TX) -> ESP32 GPIO 16 (RX2)
 //   Arduino GND        -> ESP32 GND
 //
-// Wiring (Direct mode):
-//   HC-SR04 VCC  -> ESP32 5V (or 3.3V, check your module)
-//   HC-SR04 GND  -> ESP32 GND
-//   HC-SR04 TRIG -> ESP32 GPIO 5  (configurable in portal)
-//   HC-SR04 ECHO -> ESP32 GPIO 18 (configurable in portal)
+// Wiring (Direct mode, TCRT5000):
+//   TCRT5000 VCC -> ESP32 3V3
+//   TCRT5000 GND -> ESP32 GND
+//   TCRT5000 DO  -> ESP32 GPIO 22  (see DIRECT_DO_PIN below)
+//   TCRT5000 AO  -> unused (optional analog input on an ADC pin)
 //
 // Configuration (WiFi + gateway address + device ID + sensor mode)
 // is done at RUNTIME via a captive portal, not baked into this file
@@ -34,7 +35,7 @@
 //   - WiFiManager by tzapu: https://github.com/tzapu/WiFiManager
 //   - Preferences: built into ESP32 Arduino framework, no install needed
 //
-// Board: ESP32 Dev Module (or any ESP32 variant)
+// Board: ESP32 Dev Module / ESP32-C6 (or any ESP32 variant)
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -61,10 +62,14 @@
 #define UART_RX_PIN   16    // ESP32 RX2 <- Arduino TX
 #define UART_BAUD     9600
 
-// ── Direct sensor mode (HC-SR04 on ESP32 GPIO) ──────────────
+// ── Direct sensor mode (TCRT5000 IR proximity on ESP32 GPIO) ─
 // Defaults - configurable via captive portal when mode = "direct"
+// For the TCRT5000 the DO (digital output) is read: HIGH = object
+// detected, LOW = no object. Trig/echo pin names are kept for
+// backwards compatibility with the entrance-portal fields.
 #define DIRECT_TRIG_PIN   5
 #define DIRECT_ECHO_PIN   18
+#define DIRECT_DO_PIN     22   // TCRT5000 DO
 #define DIRECT_READ_INTERVAL_MS  500
 #define DIRECT_DIST_MIN_CM  2
 #define DIRECT_DIST_MAX_CM  400
@@ -89,6 +94,7 @@
 #define SENSOR_TEMPERATURE  0x01
 #define SENSOR_HUMIDITY     0x02
 #define SENSOR_DISTANCE     0x04   // HC-SR04 ultrasonic
+#define SENSOR_PROXIMITY    0x06   // TCRT5000 IR proximity (0/1)
 #define UNIT_CELSIUS        0x01
 #define UNIT_PERCENT        0x02
 #define UNIT_CM             0x04
@@ -168,14 +174,10 @@ void setup() {
 
   // Configure direct sensor mode if selected
   if (directMode) {
-    Serial.println("Sensor mode: DIRECT (HC-SR04 on ESP32 GPIO)");
-    Serial.print("  TRIG=GPIO");
-    Serial.print(trigPin);
-    Serial.print(" ECHO=GPIO");
-    Serial.println(echoPin);
-    pinMode(trigPin, OUTPUT);
-    pinMode(echoPin, INPUT);
-    digitalWrite(trigPin, LOW);
+    Serial.println("Sensor mode: DIRECT (TCRT5000 IR proximity on ESP32 GPIO)");
+    Serial.print("  DO=GPIO");
+    Serial.println(DIRECT_DO_PIN);
+    pinMode(DIRECT_DO_PIN, INPUT);
   } else {
     Serial.println("Sensor mode: UART (reading from Arduino)");
   }
@@ -195,20 +197,14 @@ void loop() {
   }
 
   if (directMode) {
-    // Direct sensor mode: read HC-SR04 directly from ESP32 GPIO
+    // Direct sensor mode: read TCRT5000 DO (IR proximity) on ESP32 GPIO
     uint32_t now = millis();
     if (now - lastDirectRead >= DIRECT_READ_INTERVAL_MS) {
       lastDirectRead = now;
-      float distCm = measureDistanceDirect();
-      if (distCm > 0) {
-        int32_t distRaw = (int32_t)(distCm * 100.0f);
-        Serial.print("Direct read: ");
-        Serial.print(distCm, 1);
-        Serial.println(" cm");
-        processAndSendDirect(SENSOR_DISTANCE, distRaw, UNIT_CM);
-      } else {
-        Serial.println("ERROR: Direct sensor read failed");
-      }
+      bool detected = digitalRead(DIRECT_DO_PIN) == HIGH;
+      Serial.print("Direct read: ");
+      Serial.println(detected ? "OBJECT DETECTED (1)" : "no object (0)");
+      processAndSendDirect(SENSOR_PROXIMITY, detected ? 1 : 0, 0x00);
     }
   } else {
     // UART mode: check for incoming raw frame from Arduino
@@ -653,25 +649,6 @@ uint32_t loadSequenceNr() {
   uint32_t seq = prefs.getUInt(NVS_SEQ_KEY, 0);
   prefs.end();
   return seq;
-}
-
-// ─────────────────────────────────────────────────────────────
-// Direct HC-SR04 sensor reading (no Arduino needed)
-// ─────────────────────────────────────────────────────────────
-
-float measureDistanceDirect() {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-
-  long duration = pulseIn(echoPin, HIGH, 30000UL);
-  if (duration == 0) return -1.0f;
-
-  float distCm = duration / 58.0f;
-  if (distCm < DIRECT_DIST_MIN_CM || distCm > DIRECT_DIST_MAX_CM) return -1.0f;
-  return distCm;
 }
 
 // ─────────────────────────────────────────────────────────────

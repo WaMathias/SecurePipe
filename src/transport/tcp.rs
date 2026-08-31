@@ -18,7 +18,8 @@ use tracing::{error, info, warn};
 use crate::crypto::aes_gcm::{decrypt_payload, SessionKey};
 use crate::error::SecurePipeError;
 use crate::protocol::frame::{
-    SecurePipeFrame, SensorPayload, AUTH_TAG_SIZE, HEADER_SIZE, MAX_PAYLOAD_SIZE,
+    SecurePipeFrame, SensorPayload, SENSOR_PROXIMITY, AUTH_TAG_SIZE, HEADER_SIZE,
+    MAX_PAYLOAD_SIZE,
 };
 use crate::protocol::registry::DeviceRegistry;
 use crate::protocol::replay::ReplayGuard;
@@ -239,14 +240,24 @@ fn process_frame(raw: &[u8], state: &Arc<GatewayState>) {
         timestamp: frame.timestamp,
     };
 
-    info!(
-        "Device {:04X} | {} {:.2}{} | seq={}",
-        device_id,
-        reading.sensor_type,
-        reading.value,
-        reading.unit,
-        reading.sequence_nr,
-    );
+    if sensor.sensor_type == SENSOR_PROXIMITY {
+        info!(
+            "Device {:04X} | proximity {} ({}) | seq={}",
+            device_id,
+            if sensor.value_raw > 0 { "OBJECT" } else { "none" },
+            sensor.value_raw,
+            reading.sequence_nr,
+        );
+    } else {
+        info!(
+            "Device {:04X} | {} {:.2}{} | seq={}",
+            device_id,
+            reading.sensor_type,
+            reading.value,
+            reading.unit,
+            reading.sequence_nr,
+        );
+    }
 
     // Broadcast to dashboard
     let _ = state.readings_tx.send(reading);

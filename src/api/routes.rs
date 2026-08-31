@@ -160,7 +160,9 @@ static DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             <div style="font-weight:500">${d.sensor_type} · Gerät ${d.device_id.toString(16).padStart(4,'0').toUpperCase()}</div>
             <div class="reading-meta">Seq ${d.sequence_nr} · ${new Date(d.timestamp * 1000).toLocaleTimeString()}</div>
           </div>
-          <div class="reading-value">${d.value.toFixed(2)} ${d.unit}</div>`;
+          <div class="reading-value">${d.sensor_type === 'proximity'
+            ? (d.value > 0 ? 'OBJEKT ERKANNT' : 'kein Objekt')
+            : d.value.toFixed(2) + ' ' + d.unit}</div>`;
         readingsList.prepend(li);
         if (readingsList.children.length > 50) readingsList.lastChild.remove();
       }

@@ -55,6 +55,7 @@ pub const SENSOR_TEMPERATURE: u8 = 0x01;
 pub const SENSOR_HUMIDITY: u8 = 0x02;
 pub const SENSOR_PRESSURE: u8 = 0x03;
 pub const SENSOR_DISTANCE: u8 = 0x04;
+pub const SENSOR_PROXIMITY: u8 = 0x06; // TCRT5000 IR proximity (0/1)
 
 // Unit identifiers
 pub const UNIT_CELSIUS: u8 = 0x01;
@@ -186,6 +187,7 @@ impl SensorPayload {
             SENSOR_HUMIDITY    => "humidity",
             SENSOR_PRESSURE    => "pressure",
             SENSOR_DISTANCE    => "distance",
+            SENSOR_PROXIMITY   => "proximity",
             _                  => "unknown",
         }
     }
