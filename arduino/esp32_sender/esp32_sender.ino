@@ -1,28 +1,33 @@
 // ============================================================
 // SecurePipe - ESP32 Sender Node
 // ============================================================
-// Receives raw sensor frames from Arduino via UART,
+// Receives raw sensor frames from Arduino via UART (or reads an
+// HC-SR04 ultrasonic sensor directly via GPIO in "direct" mode),
 // builds and encrypts SecurePipe frames (AES-256-GCM),
 // and sends them to the Rust gateway via TCP.
 //
-// Wiring:
+// ── Two sensor modes ─────────────────────────────────────────
+//   UART mode  (default): HC-SR04 is wired to an Arduino, which
+//              sends 10-byte raw frames over SoftwareSerial.
+//              ESP32 listens on RX2 (GPIO 16).
+//   Direct mode:          HC-SR04 is wired directly to the ESP32.
+//              No Arduino needed. Set "Sensor Mode" to "direct"
+//              in the captive portal and configure TRIG/ECHO pins.
+//              ESP32 reads the sensor itself every 500 ms.
+//
+// Wiring (UART mode):
 //   Arduino Pin 3 (TX) -> ESP32 GPIO 16 (RX2)
 //   Arduino GND        -> ESP32 GND
 //
-// Configuration (WiFi + gateway address + device ID) is done at
-// RUNTIME via a captive portal, not baked into this file at compile
-// time - see docs/CONFIGURATION.md for the full walkthrough. Short
-// version:
-//   - First boot (or after a reset): the ESP32 opens a WiFi access
-//     point called "SecurePipe-Setup". Connect to it with your phone,
-//     a config page opens automatically (or go to 192.168.4.1);
-//     enter your WiFi credentials plus the gateway host/port/device ID.
-//   - Every boot after that: it reconnects automatically using the
-//     saved values - no reflashing needed to move the ESP32 from your
-//     PC to a Raspberry Pi, just enter the new gateway IP once.
-//   - To reconfigure later (new WiFi, new gateway IP, ...): hold the
-//     BOOT button (GPIO0) for 3+ seconds while/after powering on -
-//     this wipes the saved config and reopens the setup portal.
+// Wiring (Direct mode):
+//   HC-SR04 VCC  -> ESP32 5V (or 3.3V, check your module)
+//   HC-SR04 GND  -> ESP32 GND
+//   HC-SR04 TRIG -> ESP32 GPIO 5  (configurable in portal)
+//   HC-SR04 ECHO -> ESP32 GPIO 18 (configurable in portal)
+//
+// Configuration (WiFi + gateway address + device ID + sensor mode)
+// is done at RUNTIME via a captive portal, not baked into this file
+// at compile time - see docs/CONFIGURATION.md for the full walkthrough.
 //
 // Libraries needed (install via Arduino Library Manager):
 //   - mbedTLS: built into ESP32 Arduino framework, no install needed
@@ -56,6 +61,14 @@
 #define UART_RX_PIN   16    // ESP32 RX2 <- Arduino TX
 #define UART_BAUD     9600
 
+// ── Direct sensor mode (HC-SR04 on ESP32 GPIO) ──────────────
+// Defaults - configurable via captive portal when mode = "direct"
+#define DIRECT_TRIG_PIN   5
+#define DIRECT_ECHO_PIN   18
+#define DIRECT_READ_INTERVAL_MS  500
+#define DIRECT_DIST_MIN_CM  2
+#define DIRECT_DIST_MAX_CM  400
+
 // ── SecurePipe protocol constants ───────────────────────────
 // Must match Rust gateway exactly
 #define SP_MAGIC_0    0x53   // 'S'
@@ -75,8 +88,10 @@
 // Sensor types and units
 #define SENSOR_TEMPERATURE  0x01
 #define SENSOR_HUMIDITY     0x02
+#define SENSOR_DISTANCE     0x04   // HC-SR04 ultrasonic
 #define UNIT_CELSIUS        0x01
 #define UNIT_PERCENT        0x02
+#define UNIT_CM             0x04
 
 // ── MVP: hardcoded test key (32 bytes = AES-256) ─────────────
 // MUST match SessionKey::dev_test_key() in Rust exactly.
@@ -103,10 +118,16 @@ bool shouldSaveConfig = false;
 char gatewayHostBuf[41]  = "192.168.1.100";
 char gatewayPortBuf[6]   = "7777";
 char deviceIdBuf[9]      = "00000001";
+char sensorModeBuf[8]    = "uart";     // "uart" or "direct"
+char trigPinBuf[5]       = "5";
+char echoPinBuf[5]       = "18";
 
 char     gatewayHost[41];
 uint16_t gatewayPort = 7777;
 uint32_t deviceId    = 0x00000001UL;
+bool     directMode  = false;     // true = read HC-SR04 directly
+uint8_t  trigPin     = DIRECT_TRIG_PIN;
+uint8_t  echoPin     = DIRECT_ECHO_PIN;
 
 // ── State ─────────────────────────────────────────────────────
 WiFiClient       tcpClient;
@@ -114,6 +135,7 @@ HardwareSerial   arduinoSerial(2);   // UART2
 
 uint32_t         sequenceNr   = 0;
 bool             connected    = false;
+uint32_t         lastDirectRead = 0;
 
 // mbedTLS RNG context (used for nonce generation)
 mbedtls_entropy_context  entropy;
@@ -138,6 +160,26 @@ void setup() {
 
   maybeFactoryReset();
   setupWiFiAndConfig();
+
+  // Load persisted sequence number from NVS
+  sequenceNr = loadSequenceNr();
+  Serial.print("Loaded sequence number from NVS: ");
+  Serial.println(sequenceNr);
+
+  // Configure direct sensor mode if selected
+  if (directMode) {
+    Serial.println("Sensor mode: DIRECT (HC-SR04 on ESP32 GPIO)");
+    Serial.print("  TRIG=GPIO");
+    Serial.print(trigPin);
+    Serial.print(" ECHO=GPIO");
+    Serial.println(echoPin);
+    pinMode(trigPin, OUTPUT);
+    pinMode(echoPin, INPUT);
+    digitalWrite(trigPin, LOW);
+  } else {
+    Serial.println("Sensor mode: UART (reading from Arduino)");
+  }
+
   syncTime();
   connectGateway();
 }
@@ -152,15 +194,33 @@ void loop() {
     return;
   }
 
-  // Check for incoming raw frame from Arduino
-  if (arduinoSerial.available() >= RAW_FRAME_SIZE) {
-    uint8_t rawFrame[RAW_FRAME_SIZE];
-    arduinoSerial.readBytes(rawFrame, RAW_FRAME_SIZE);
+  if (directMode) {
+    // Direct sensor mode: read HC-SR04 directly from ESP32 GPIO
+    uint32_t now = millis();
+    if (now - lastDirectRead >= DIRECT_READ_INTERVAL_MS) {
+      lastDirectRead = now;
+      float distCm = measureDistanceDirect();
+      if (distCm > 0) {
+        int32_t distRaw = (int32_t)(distCm * 100.0f);
+        Serial.print("Direct read: ");
+        Serial.print(distCm, 1);
+        Serial.println(" cm");
+        processAndSendDirect(SENSOR_DISTANCE, distRaw, UNIT_CM);
+      } else {
+        Serial.println("ERROR: Direct sensor read failed");
+      }
+    }
+  } else {
+    // UART mode: check for incoming raw frame from Arduino
+    if (arduinoSerial.available() >= RAW_FRAME_SIZE) {
+      uint8_t rawFrame[RAW_FRAME_SIZE];
+      arduinoSerial.readBytes(rawFrame, RAW_FRAME_SIZE);
 
-    if (validateRawFrame(rawFrame)) {
-      processAndSend(rawFrame);
-    } else {
-      Serial.println("ERROR: Invalid raw frame from Arduino - discarding");
+      if (validateRawFrame(rawFrame)) {
+        processAndSend(rawFrame);
+      } else {
+        Serial.println("ERROR: Invalid raw frame from Arduino - discarding");
+      }
     }
   }
 }
@@ -219,19 +279,31 @@ void setupWiFiAndConfig() {
   String savedHost = prefs.getString("gw_host", gatewayHostBuf);
   String savedPort = prefs.getString("gw_port", gatewayPortBuf);
   String savedDevId = prefs.getString("dev_id", deviceIdBuf);
+  String savedMode = prefs.getString("sensor_mode", sensorModeBuf);
+  String savedTrig = prefs.getString("trig_pin", trigPinBuf);
+  String savedEcho = prefs.getString("echo_pin", echoPinBuf);
   prefs.end();
 
   savedHost.toCharArray(gatewayHostBuf, sizeof(gatewayHostBuf));
   savedPort.toCharArray(gatewayPortBuf, sizeof(gatewayPortBuf));
   savedDevId.toCharArray(deviceIdBuf, sizeof(deviceIdBuf));
+  savedMode.toCharArray(sensorModeBuf, sizeof(sensorModeBuf));
+  savedTrig.toCharArray(trigPinBuf, sizeof(trigPinBuf));
+  savedEcho.toCharArray(echoPinBuf, sizeof(echoPinBuf));
 
   WiFiManagerParameter paramHost("gw_host", "Gateway Host / IP", gatewayHostBuf, sizeof(gatewayHostBuf) - 1);
   WiFiManagerParameter paramPort("gw_port", "Gateway Port", gatewayPortBuf, sizeof(gatewayPortBuf) - 1);
   WiFiManagerParameter paramDevId("dev_id", "Device ID (8 hex digits)", deviceIdBuf, sizeof(deviceIdBuf) - 1);
+  WiFiManagerParameter paramMode("sensor_mode", "Sensor Mode (uart / direct)", sensorModeBuf, sizeof(sensorModeBuf) - 1);
+  WiFiManagerParameter paramTrig("trig_pin", "TRIG pin (direct mode only)", trigPinBuf, sizeof(trigPinBuf) - 1);
+  WiFiManagerParameter paramEcho("echo_pin", "ECHO pin (direct mode only)", echoPinBuf, sizeof(echoPinBuf) - 1);
 
   wifiManager.addParameter(&paramHost);
   wifiManager.addParameter(&paramPort);
   wifiManager.addParameter(&paramDevId);
+  wifiManager.addParameter(&paramMode);
+  wifiManager.addParameter(&paramTrig);
+  wifiManager.addParameter(&paramEcho);
   wifiManager.setSaveConfigCallback(onConfigSaved);
   wifiManager.setConfigPortalTimeout(CONFIG_PORTAL_TIMEOUT_SECS);
 
@@ -253,11 +325,19 @@ void setupWiFiAndConfig() {
   strncpy(gatewayHostBuf, paramHost.getValue(), sizeof(gatewayHostBuf) - 1);
   strncpy(gatewayPortBuf, paramPort.getValue(), sizeof(gatewayPortBuf) - 1);
   strncpy(deviceIdBuf,    paramDevId.getValue(), sizeof(deviceIdBuf) - 1);
+  strncpy(sensorModeBuf,  paramMode.getValue(), sizeof(sensorModeBuf) - 1);
+  strncpy(trigPinBuf,     paramTrig.getValue(), sizeof(trigPinBuf) - 1);
+  strncpy(echoPinBuf,     paramEcho.getValue(), sizeof(echoPinBuf) - 1);
 
   strncpy(gatewayHost, gatewayHostBuf, sizeof(gatewayHost) - 1);
   gatewayHost[sizeof(gatewayHost) - 1] = '\0';
   gatewayPort = (uint16_t) strtoul(gatewayPortBuf, nullptr, 10);
   deviceId    = (uint32_t) strtoul(deviceIdBuf, nullptr, 16);
+
+  // Parse sensor mode
+  directMode = (strcmp(sensorModeBuf, "direct") == 0);
+  trigPin    = (uint8_t) strtoul(trigPinBuf, nullptr, 10);
+  echoPin    = (uint8_t) strtoul(echoPinBuf, nullptr, 10);
 
   if (shouldSaveConfig) {
     Serial.println("Saving gateway config to flash...");
@@ -265,11 +345,15 @@ void setupWiFiAndConfig() {
     prefs.putString("gw_host", gatewayHostBuf);
     prefs.putString("gw_port", gatewayPortBuf);
     prefs.putString("dev_id",  deviceIdBuf);
+    prefs.putString("sensor_mode", sensorModeBuf);
+    prefs.putString("trig_pin", trigPinBuf);
+    prefs.putString("echo_pin", echoPinBuf);
     prefs.end();
   }
 
-  Serial.printf("Config: gateway=%s:%u device_id=0x%08X\n",
-                gatewayHost, gatewayPort, deviceId);
+  Serial.printf("Config: gateway=%s:%u device_id=0x%08X mode=%s\n",
+                gatewayHost, gatewayPort, deviceId,
+                directMode ? "direct" : "uart");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -320,9 +404,11 @@ void connectGateway() {
 
   Serial.println("Connected to gateway");
   connected = true;
-  // Reset sequence number on new connection
-  // Each new TCP session = fresh sequence counter
-  sequenceNr = 0;
+  // Sequence number is NOT reset here - it is persisted in NVS
+  // and survives reconnects. This is critical: the gateway's shared
+  // ReplayGuard retains history across reconnects, so resetting the
+  // local counter would cause all subsequent frames to be rejected
+  // as replays. See docs/SECURITY.md.
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -355,6 +441,7 @@ void processAndSend(uint8_t* rawFrame) {
   uint8_t unit       = rawFrame[6];
 
   sequenceNr++;
+  saveSequenceNr(sequenceNr);
 
   Serial.print("Sending frame #");
   Serial.print(sequenceNr);
@@ -543,4 +630,91 @@ uint16_t crc16(uint8_t* data, uint16_t length) {
     }
   }
   return crc;
+}
+
+// ─────────────────────────────────────────────────────────────
+// NVS persistence for sequence number
+// Prevents replay-rejection after reconnects: the gateway's shared
+// ReplayGuard keeps history across TCP sessions, so the ESP32 must
+// continue counting from where it left off.
+// ─────────────────────────────────────────────────────────────
+
+#define NVS_NAMESPACE  "securepipe"
+#define NVS_SEQ_KEY    "seq_nr"
+
+void saveSequenceNr(uint32_t seq) {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putUInt(NVS_SEQ_KEY, seq);
+  prefs.end();
+}
+
+uint32_t loadSequenceNr() {
+  prefs.begin(NVS_NAMESPACE, true); // read-only
+  uint32_t seq = prefs.getUInt(NVS_SEQ_KEY, 0);
+  prefs.end();
+  return seq;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Direct HC-SR04 sensor reading (no Arduino needed)
+// ─────────────────────────────────────────────────────────────
+
+float measureDistanceDirect() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 30000UL);
+  if (duration == 0) return -1.0f;
+
+  float distCm = duration / 58.0f;
+  if (distCm < DIRECT_DIST_MIN_CM || distCm > DIRECT_DIST_MAX_CM) return -1.0f;
+  return distCm;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Process sensor data from direct mode and send
+// ─────────────────────────────────────────────────────────────
+
+void processAndSendDirect(uint8_t sensorType, int32_t valueRaw, uint8_t unit) {
+  sequenceNr++;
+  saveSequenceNr(sequenceNr);
+
+  Serial.print("Sending frame #");
+  Serial.print(sequenceNr);
+  Serial.print(" | type=0x");
+  Serial.print(sensorType, HEX);
+  Serial.print(" | value=");
+  Serial.println(valueRaw);
+
+  uint8_t payload[PAYLOAD_SIZE];
+  buildPayload(payload, sensorType, valueRaw, unit);
+
+  uint8_t nonce[NONCE_SIZE];
+  generateNonce(nonce);
+
+  uint64_t timestamp = (uint64_t)time(nullptr);
+
+  uint8_t header[HEADER_SIZE];
+  buildHeader(header, timestamp, nonce, PAYLOAD_SIZE);
+
+  uint8_t encryptedPayload[PAYLOAD_SIZE];
+  uint8_t authTag[AUTH_TAG_SIZE];
+
+  bool ok = encryptPayload(
+    payload, PAYLOAD_SIZE,
+    header, HEADER_SIZE,
+    nonce,
+    encryptedPayload,
+    authTag
+  );
+
+  if (!ok) {
+    Serial.println("ERROR: Encryption failed");
+    return;
+  }
+
+  sendSecurePipeFrame(header, encryptedPayload, authTag);
 }

@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum SecurePipeError {
     #[error("Invalid magic bytes - not a SecurePipe frame")]
     InvalidMagic,
@@ -35,6 +36,9 @@ pub enum SecurePipeError {
     #[error("Frame too old: timestamp {0} seconds in the past")]
     FrameStale(u64),
 
+    #[error("Frame from the future: timestamp {0} seconds ahead")]
+    FrameFuture(u64),
+
     #[error("Handshake failed: {0}")]
     HandshakeFailed(String),
 
@@ -46,6 +50,16 @@ pub enum SecurePipeError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[allow(dead_code)]
+impl SecurePipeError {
+    pub fn is_auth_failure(&self) -> bool {
+        matches!(
+            self,
+            SecurePipeError::AuthTagInvalid | SecurePipeError::DecryptionFailed
+        )
+    }
 }
 
 pub type Result<T> = std::result::Result<T, SecurePipeError>;

@@ -8,6 +8,7 @@ use crate::error::{Result, SecurePipeError};
 pub const MAGIC: [u8; 2] = [0x53, 0x50];
 
 // Magic bytes for handshake frames: "SH" in ASCII
+#[allow(dead_code)]
 pub const MAGIC_HANDSHAKE: [u8; 2] = [0x53, 0x48];
 
 pub const PROTOCOL_VERSION: u8 = 0x01;
@@ -15,6 +16,7 @@ pub const PROTOCOL_VERSION: u8 = 0x01;
 // Fixed sizes in bytes
 pub const NONCE_SIZE: usize = 12;       // AES-GCM nonce
 pub const AUTH_TAG_SIZE: usize = 16;    // AES-GCM authentication tag
+#[allow(dead_code)]
 pub const PUBLIC_KEY_SIZE: usize = 32;  // Curve25519 public key
 
 // Header layout (all unencrypted):
@@ -52,11 +54,13 @@ pub const MAX_PAYLOAD_SIZE: usize = 512;
 pub const SENSOR_TEMPERATURE: u8 = 0x01;
 pub const SENSOR_HUMIDITY: u8 = 0x02;
 pub const SENSOR_PRESSURE: u8 = 0x03;
+pub const SENSOR_DISTANCE: u8 = 0x04;
 
 // Unit identifiers
 pub const UNIT_CELSIUS: u8 = 0x01;
 pub const UNIT_PERCENT: u8 = 0x02;
 pub const UNIT_HPA: u8 = 0x03;
+pub const UNIT_CM: u8 = 0x04;
 
 // Maximum age of a frame before it is considered stale (seconds)
 pub const MAX_FRAME_AGE_SECS: u64 = 30;
@@ -140,6 +144,7 @@ impl SecurePipeFrame {
     }
 
     /// Returns the total expected byte length of this frame
+    #[allow(dead_code)]
     pub fn total_len(&self) -> usize {
         HEADER_SIZE + self.encrypted_payload.len() + AUTH_TAG_SIZE
     }
@@ -180,6 +185,7 @@ impl SensorPayload {
             SENSOR_TEMPERATURE => "temperature",
             SENSOR_HUMIDITY    => "humidity",
             SENSOR_PRESSURE    => "pressure",
+            SENSOR_DISTANCE    => "distance",
             _                  => "unknown",
         }
     }
@@ -189,6 +195,7 @@ impl SensorPayload {
             UNIT_CELSIUS => "°C",
             UNIT_PERCENT => "%",
             UNIT_HPA     => "hPa",
+            UNIT_CM      => "cm",
             _            => "?",
         }
     }
@@ -376,5 +383,23 @@ mod tests {
 
         let result = SensorPayload::parse(&payload);
         assert!(matches!(result, Err(SecurePipeError::AuthTagInvalid)));
+    }
+
+    #[test]
+    fn sensor_payload_distance_type() {
+        let mut payload = [0u8; PAYLOAD_SIZE];
+        payload[0] = SENSOR_DISTANCE;
+        let value: i32 = 1234; // 12.34 cm
+        payload[1..5].copy_from_slice(&value.to_be_bytes());
+        payload[5] = UNIT_CM;
+        let crc = crc16(&payload[0..6]);
+        payload[6..8].copy_from_slice(&crc.to_be_bytes());
+
+        let parsed = SensorPayload::parse(&payload).expect("should parse");
+        assert_eq!(parsed.sensor_type, SENSOR_DISTANCE);
+        assert_eq!(parsed.unit, UNIT_CM);
+        assert!((parsed.value_f32() - 12.34).abs() < 0.001);
+        assert_eq!(parsed.sensor_type_str(), "distance");
+        assert_eq!(parsed.unit_str(), "cm");
     }
 }

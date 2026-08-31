@@ -78,9 +78,16 @@ impl ReplayGuard {
             .as_secs();
 
         // Frame must not be older than MAX_FRAME_AGE_SECS
-        // Also reject frames from the future (clock skew > 5s)
         if now > timestamp && now - timestamp > MAX_FRAME_AGE_SECS {
             return Err(SecurePipeError::FrameStale(now - timestamp));
+        }
+
+        // Reject frames from the future (clock skew > 5s)
+        // Prevents an attacker with a future-dated frame from bypassing
+        // the staleness check by getting it accepted before the real clock
+        // catches up.
+        if timestamp > now && timestamp - now > MAX_FRAME_AGE_SECS {
+            return Err(SecurePipeError::FrameFuture(timestamp - now));
         }
 
         Ok(())
@@ -107,6 +114,7 @@ impl ReplayGuard {
     }
 
     /// Remove state for a device (e.g. after disconnect)
+    #[allow(dead_code)]
     pub fn remove_device(&mut self, device_id: u32) {
         self.devices.remove(&device_id);
     }
@@ -189,6 +197,25 @@ mod tests {
 
         let result = guard.check(1, 1, old_timestamp, &nonce(0x01));
         assert!(matches!(result, Err(SecurePipeError::FrameStale(_))));
+    }
+
+    #[test]
+    fn future_timestamp_beyond_window_is_rejected() {
+        let mut guard = ReplayGuard::new();
+        let future_timestamp = now() + MAX_FRAME_AGE_SECS + 10; // 10s past the future window
+
+        let result = guard.check(1, 1, future_timestamp, &nonce(0x01));
+        assert!(matches!(result, Err(SecurePipeError::FrameFuture(_))));
+    }
+
+    #[test]
+    fn small_clock_skew_within_window_passes() {
+        let mut guard = ReplayGuard::new();
+        // 5s into the future is allowed (within MAX_FRAME_AGE_SECS)
+        let slightly_future = now() + 5;
+
+        let result = guard.check(1, 1, slightly_future, &nonce(0x01));
+        assert!(result.is_ok());
     }
 
     #[test]

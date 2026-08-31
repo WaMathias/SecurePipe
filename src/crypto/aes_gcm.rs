@@ -17,6 +17,7 @@ use crate::protocol::frame::NONCE_SIZE;
 #[derive(Clone)]
 pub struct SessionKey(pub [u8; 32]);
 
+#[allow(dead_code)]
 impl SessionKey {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         SessionKey(bytes)
@@ -88,6 +89,7 @@ pub fn decrypt_payload(
 }
 
 /// Encrypts a payload and appends the authentication tag.
+#[allow(dead_code)]
 pub fn encrypt_payload(
     key: &SessionKey,
     nonce: &[u8; NONCE_SIZE],

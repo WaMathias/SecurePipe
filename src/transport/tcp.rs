@@ -205,7 +205,10 @@ fn process_frame(raw: &[u8], state: &Arc<GatewayState>) {
     // Step 4: Replay check (after auth tag - never process unauthenticated
     // data). Shared, device_id-keyed guard - survives reconnects.
     {
-        let mut replay_guard = state.replay_guard.lock().unwrap();
+        let mut replay_guard = state
+            .replay_guard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Err(e) = replay_guard.check(
             device_id,
             frame.sequence_nr,
