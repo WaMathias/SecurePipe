@@ -90,7 +90,7 @@ async fn dashboard_html() -> Html<&'static str> {
 }
 
 static DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -118,17 +118,17 @@ static DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 </head>
 <body>
   <h1>SecurePipe</h1>
-  <p class="subtitle">Verschlüsseltes IoT-Sensorprotokoll — Live-Dashboard</p>
-  <p id="connection-status"><span class="status-dot" id="dot"></span><span id="status-text">Verbinde...</span></p>
+  <p class="subtitle">Encrypted IoT sensor protocol — Live Dashboard</p>
+  <p id="connection-status"><span class="status-dot" id="dot"></span><span id="status-text">Connecting...</span></p>
 
   <div class="grid">
     <div class="card">
-      <h2>Sensordaten</h2>
-      <ul id="readings-list"><li style="color:#64748b; font-size:0.875rem">Warte auf Daten...</li></ul>
+      <h2>Sensor Data</h2>
+      <ul id="readings-list"><li style="color:#64748b; font-size:0.875rem">Waiting for data...</li></ul>
     </div>
     <div class="card">
-      <h2>Sicherheitsereignisse</h2>
-      <ul id="events-list"><li style="color:#64748b; font-size:0.875rem">Keine Ereignisse</li></ul>
+      <h2>Security Events</h2>
+      <ul id="events-list"><li style="color:#64748b; font-size:0.875rem">No events</li></ul>
     </div>
   </div>
 
@@ -144,7 +144,7 @@ static DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 
     es.onopen = () => {
       dot.classList.add('connected');
-      statusText.textContent = 'Verbunden';
+      statusText.textContent = 'Connected';
     };
 
     es.onmessage = (e) => {
@@ -157,11 +157,11 @@ static DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
         li.className = 'reading-item';
         li.innerHTML = `
           <div>
-            <div style="font-weight:500">${d.sensor_type} · Gerät ${d.device_id.toString(16).padStart(4,'0').toUpperCase()}</div>
+            <div style="font-weight:500">${d.sensor_type} · Device ${d.device_id.toString(16).padStart(4,'0').toUpperCase()}</div>
             <div class="reading-meta">Seq ${d.sequence_nr} · ${new Date(d.timestamp * 1000).toLocaleTimeString()}</div>
           </div>
           <div class="reading-value">${d.sensor_type === 'proximity'
-            ? (d.value > 0 ? 'OBJEKT ERKANNT' : 'kein Objekt')
+            ? (d.value > 0 ? 'OBJECT DETECTED' : 'no object')
             : d.value.toFixed(2) + ' ' + d.unit}</div>`;
         readingsList.prepend(li);
         if (readingsList.children.length > 50) readingsList.lastChild.remove();
@@ -182,7 +182,7 @@ static DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 
     es.onerror = () => {
       dot.classList.remove('connected');
-      statusText.textContent = 'Verbindung unterbrochen — versuche erneut...';
+      statusText.textContent = 'Connection interrupted — retrying...';
     };
   </script>
 </body>

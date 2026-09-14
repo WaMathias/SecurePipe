@@ -1,102 +1,102 @@
-# Konfiguration & Deployment
+# Configuration & Deployment
 
-Dieses Dokument erklärt, wie Gateway und ESP32 konfiguriert werden, und wie
-du zwischen den zwei üblichen Aufbauten wechselst:
+This document explains how the gateway and the ESP32 are configured, and how
+you switch between the two usual setups:
 
-- **Direkt**: ein ESP32 mit einem Sensor sendet direkt an den Rust-Gateway,
-  der auf deinem eigenen Rechner läuft.
-- **Über Raspberry Pi**: derselbe ESP32 sendet stattdessen an einen
-  Raspberry Pi, auf dem der (identische) Rust-Gateway läuft - z. B. weil der
-  Pi dauerhaft läuft und dein Rechner nicht.
+- **Direct**: an ESP32 with a sensor sends directly to the Rust gateway,
+  which runs on your own computer.
+- **Via Raspberry Pi**: the same ESP32 instead sends to a
+  Raspberry Pi, on which the (identical) Rust gateway runs - e.g. because the
+  Pi runs permanently and your computer doesn't.
 
-Für beide Aufbauten reicht **ein einziges Gerät** (ein ESP32 + ein Sensor) -
-`device_id` existiert nur, damit das Protokoll bei Bedarf mehrere Geräte
-unterscheiden kann, nicht weil mehrere Geräte nötig wären.
+For both setups, **a single device** (an ESP32 + a sensor) is enough -
+`device_id` only exists so that the protocol can distinguish between multiple
+devices if needed, not because multiple devices are required.
 
-## Rust-Gateway
+## Rust Gateway
 
-Alle drei folgenden Variablen sind optional - ohne sie verhält sich der
-Gateway wie bisher (Bind auf `0.0.0.0`, keine Geräte-Einschränkung).
+All three of the following variables are optional - without them the gateway
+behaves as before (bind to `0.0.0.0`, no device restriction).
 
-| Variable | Default | Bedeutung |
+| Variable | Default | Meaning |
 |---|---|---|
-| `SECUREPIPE_TCP_BIND` | `0.0.0.0:7777` | Adresse, auf der der Gateway auf ESP32-Verbindungen lauscht |
-| `SECUREPIPE_HTTP_BIND` | `0.0.0.0:8080` | Adresse für das Web-Dashboard |
-| `SECUREPIPE_ALLOWED_DEVICES` | *(nicht gesetzt = alle erlaubt)* | Kommagetrennte Liste erlaubter `device_id`s, hex (`0x...`) oder dezimal |
+| `SECUREPIPE_TCP_BIND` | `0.0.0.0:7777` | Address on which the gateway listens for ESP32 connections |
+| `SECUREPIPE_HTTP_BIND` | `0.0.0.0:8080` | Address for the web dashboard |
+| `SECUREPIPE_ALLOWED_DEVICES` | *(not set = all allowed)* | Comma-separated list of allowed `device_id`s, hex (`0x...`) or decimal |
 
-Beispiele:
+Examples:
 
 ```bash
-# Standardbetrieb (wie bisher), lokal auf dem eigenen Rechner
+# Standard operation (as before), locally on your own computer
 cargo run --bin gateway
 
-# Auf dem Raspberry Pi, nur auf der LAN-Schnittstelle lauschen
+# On the Raspberry Pi, listening only on the LAN interface
 SECUREPIPE_TCP_BIND=0.0.0.0:7777 \
 SECUREPIPE_HTTP_BIND=0.0.0.0:8080 \
 cargo run --bin gateway
 
-# Nur genau ein bekanntes Gerät akzeptieren
+# Accept only exactly one known device
 SECUREPIPE_ALLOWED_DEVICES=0x00000001 cargo run --bin gateway
 
-# Mehrere Geräte
+# Multiple devices
 SECUREPIPE_ALLOWED_DEVICES=0x00000001,0x00000002,42 cargo run --bin gateway
 ```
 
-Das Binary selbst ist identisch, egal ob es auf deinem Rechner oder einem
-Raspberry Pi läuft (Rust kompiliert für ARM genauso wie für x86) - der
-einzige Unterschied ist, wohin das ESP32 seine Frames schickt (siehe unten).
+The binary itself is identical, whether it runs on your computer or a
+Raspberry Pi (Rust compiles for ARM just as well as for x86) - the
+only difference is where the ESP32 sends its frames (see below).
 
-## ESP32-Firmware: Captive-Portal statt Neuflashen
+## ESP32 firmware: captive portal instead of reflashing
 
-WLAN-Zugangsdaten, Gateway-Host/-Port und Device-ID stehen nicht mehr als
-`#define` im Code, sondern werden einmalig über eine kleine Weboberfläche
-eingegeben und danach im Flash-Speicher (NVS) des ESP32 gespeichert.
+WiFi credentials, gateway host/port and device ID are no longer `#define`s
+in the code, but are entered once via a small web interface and then stored
+in the flash memory (NVS) of the ESP32.
 
-### Erstes Setup
+### First setup
 
-1. ESP32 mit Strom versorgen (Firmware muss einmal geflasht sein, siehe
-   unten für benötigte Libraries).
-2. Der ESP32 öffnet einen eigenen WLAN-Access-Point namens
-   **`SecurePipe-Setup`**. Mit Handy oder Laptop damit verbinden.
-3. Es sollte sich automatisch eine Konfigurationsseite öffnen (Captive
-   Portal). Falls nicht: `192.168.4.1` im Browser öffnen.
-4. Dort: eigenes WLAN auswählen + Passwort eingeben, dazu die drei
-   zusätzlichen Felder:
-   - **Gateway Host / IP** - die IP deines Rechners oder Raspberry Pis
-   - **Gateway Port** - Standard `7777`
-   - **Device ID** - 8 Hex-Ziffern, z. B. `00000001`
-5. Speichern. Der ESP32 verbindet sich, merkt sich alles und sendet ab
-   jetzt an das eingetragene Ziel.
+1. Power the ESP32 (the firmware must have been flashed once, see
+   below for the required libraries).
+2. The ESP32 opens its own WiFi access point called
+   **`SecurePipe-Setup`**. Connect to it with a phone or laptop.
+3. A configuration page should open automatically (captive
+   portal). If not: open `192.168.4.1` in the browser.
+4. There: select your own WiFi + enter the password, plus the three
+   additional fields:
+   - **Gateway Host / IP** - the IP of your computer or Raspberry Pi
+   - **Gateway Port** - default `7777`
+   - **Device ID** - 8 hex digits, e.g. `00000001`
+5. Save. The ESP32 connects, remembers everything and starts sending
+   to the entered target from now on.
 
-### Von "eigener Rechner" auf "Raspberry Pi" wechseln
+### Switching from "your own computer" to "Raspberry Pi"
 
-Kein Neuflashen nötig:
+No reflashing needed:
 
-1. BOOT-Taste (GPIO0) beim/nach dem Einschalten **3 Sekunden gedrückt
-   halten** - das löscht die gespeicherte Konfiguration und öffnet wieder
-   das Setup-Portal.
-2. Wie oben neu verbinden, diesmal die IP des Raspberry Pi eintragen.
+1. **Hold the BOOT button** (GPIO0) **for 3 seconds** when/after
+   powering on - this deletes the saved configuration and reopens
+   the setup portal.
+2. Reconnect as above, this time entering the IP of the Raspberry Pi.
 
-### Danach
+### Afterwards
 
-Bei jedem weiteren Neustart verbindet sich der ESP32 automatisch mit den
-gespeicherten Werten - kein Portal, kein manueller Schritt mehr, genau wie
-vorher mit den hartkodierten `#define`s, nur eben änderbar ohne Neuflashen.
+On every subsequent reboot, the ESP32 automatically connects with the
+saved values - no portal, no manual step anymore, exactly like
+before with the hardcoded `#define`s, only changeable without reflashing.
 
-### Benötigte Arduino-Libraries
+### Required Arduino libraries
 
-Zusätzlich zum bisherigen Setup (mbedTLS ist im ESP32-Arduino-Core
-enthalten):
+In addition to the previous setup (mbedTLS is included in the
+ESP32 Arduino core):
 
-- **WiFiManager** von tzapu - über den Arduino Library Manager installieren
-  (Suche nach "WiFiManager", Autor "tzapu"), oder
+- **WiFiManager** by tzapu - install via the Arduino Library Manager
+  (search for "WiFiManager", author "tzapu"), or
   https://github.com/tzapu/WiFiManager
-- **Preferences** - im ESP32-Arduino-Core enthalten, keine Installation
-  nötig.
+- **Preferences** - included in the ESP32 Arduino core, no installation
+  needed.
 
-### Was sich am Wiring/Sensor-Teil NICHT ändert
+### What does NOT change on the wiring/sensor side
 
-Die Arduino-Sensor-Node (`arduino/sensor_node/sensor_node.ino`) und die
-UART-Verbindung zwischen Arduino und ESP32 sind von alldem unberührt - die
-Änderungen betreffen ausschließlich, wie das ESP32 sein WLAN und sein
-Sendeziel konfiguriert bekommt.
+The Arduino sensor node (`arduino/sensor_node/sensor_node.ino`) and the
+UART connection between Arduino and ESP32 are unaffected by all of this - the
+changes only concern how the ESP32 gets its WiFi and its
+send target configured.

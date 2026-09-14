@@ -85,7 +85,7 @@ void setup() {
     display.println("SecurePipe v1");
     display.println("HC-SR04 Node");
     display.println("------------");
-    display.println("Initialisiere...");
+    display.println("Initializing...");
     display.display();
   } else {
     Serial.println("OLED init failed - continuing without display");
@@ -112,7 +112,7 @@ void readAndSend() {
 
   if (distCm < 0) {
     Serial.println("ERROR: HC-SR04 out of range or no echo");
-    showError("Kein Echo!");
+    showError("No echo!");
     return;
   }
 
@@ -124,7 +124,7 @@ void readAndSend() {
 
   Serial.print("Frame #");
   Serial.print(frameCount);
-  Serial.print(" | Distanz: ");
+  Serial.print(" | Distance: ");
   Serial.print(distCm, 1);
   Serial.println(" cm");
 
@@ -240,7 +240,7 @@ void showError(const char* msg) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println("! FEHLER !");
+  display.println("! ERROR !");
   display.println(msg);
   display.display();
 }

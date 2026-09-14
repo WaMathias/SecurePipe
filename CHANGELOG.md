@@ -1,67 +1,66 @@
 # Changelog
 
-Alle Änderungen aus diesem Review-Durchgang. Details und Hintergründe stehen
-in [`docs/SECURITY.md`](docs/SECURITY.md) und [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
+All changes from this review round. Details and background can be found
+in [`docs/SECURITY.md`](docs/SECURITY.md) and [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
-## Sicherheit
+## Security
 
-- **Speicher-DoS behoben**: Die deklarierte Payload-Länge im Frame-Header
-  wird jetzt gegen ein Maximum (`MAX_PAYLOAD_SIZE = 512` Byte) geprüft,
-  *bevor* dafür ein Buffer alloziert wird. Vorher konnte ein Angreifer über
-  ein manipuliertes Längenfeld beliebig große Speicherallokationen
-  erzwingen. (`src/protocol/frame.rs`, `src/transport/tcp.rs`)
-- **Replay-Schutz überlebt jetzt Reconnects**: Der `ReplayGuard` liegt nicht
-  mehr pro TCP-Verbindung, sondern einmal geteilt (hinter einem `Mutex`) im
-  `GatewayState`, keyed pro `device_id`. Vorher wurde die Sequenznummer-
-  Historie bei jedem Reconnect (z. B. nach WiFi-Aussetzer) gelöscht, was
-  kurz danach ein Replay-Fenster wieder geöffnet hätte.
+- **Memory-Exhaustion DoS fixed**: The declared payload length in the frame header
+  is now validated against a maximum (`MAX_PAYLOAD_SIZE = 512` bytes),
+  *before* a buffer is allocated for it. Previously an attacker could use
+  a manipulated length field to force arbitrarily large memory allocations.
+  (`src/protocol/frame.rs`, `src/transport/tcp.rs`)
+- **Replay protection now survives reconnects**: The `ReplayGuard` is no longer
+  per TCP connection but shared once (behind a `Mutex`) in the
+  `GatewayState`, keyed per `device_id`. Previously the sequence-number
+  history was cleared on every reconnect (e.g. after a WiFi drop), which
+  would have reopened a replay window shortly afterwards.
   (`src/transport/tcp.rs`, `src/main.rs`)
-- **Geräte-Whitelist ergänzt**: Neues Modul `src/protocol/registry.rs`.
-  Über `SECUREPIPE_ALLOWED_DEVICES` lässt sich festlegen, welche
-  `device_id`s die Gateway überhaupt akzeptiert. Ohne gesetzte Variable
-  bleibt das Verhalten wie bisher (alle Geräte werden akzeptiert), damit
-  ein einzelnes frisch geflashtes ESP32 ohne weitere Konfiguration
-  funktioniert.
+- **Device whitelist added**: New module `src/protocol/registry.rs`.
+  Via `SECUREPIPE_ALLOWED_DEVICES` you can define which
+  `device_id`s the gateway accepts at all. Without the variable set,
+  behavior stays as before (all devices accepted), so that a single
+  freshly-flashed ESP32 works without any additional configuration.
 
-## Bugfix (beim Testen gefunden, unabhängig von den obigen Punkten)
+## Bugfix (found while testing, independent of the points above)
 
-- **`decrypt_payload` gab zu viele Bytes zurück**: Der entschlüsselte Buffer
-  wurde nicht auf die tatsächliche Klartextlänge gekürzt, sondern enthielt
-  noch die (jetzt bedeutungslosen) Auth-Tag-Bytes am Ende. Ist in der Praxis
-  nie aufgefallen, weil `SensorPayload::parse` ohnehin nur die ersten 8 Byte
-  liest - ein bestehender Unit-Test (`encrypt_then_decrypt_roundtrip`) hat es
-  aber aufgedeckt. Gefixt in `src/crypto/aes_gcm.rs`.
+- **`decrypt_payload` returned too many bytes**: The decrypted buffer
+  was not trimmed to the actual plaintext length but still contained
+  the (now meaningless) auth-tag bytes at the end. Never noticed in
+  practice because `SensorPayload::parse` only reads the first 8 bytes
+  anyway - an existing unit test (`encrypt_then_decrypt_roundtrip`)
+  uncovered it though. Fixed in `src/crypto/aes_gcm.rs`.
 
-## Konfiguration statt Hardcoding
+## Configuration instead of hardcoding
 
-- **Rust-Gateway**: `SECUREPIPE_TCP_BIND` und `SECUREPIPE_HTTP_BIND` als
-  Umgebungsvariablen statt hartkodierter Konstanten in `main.rs`. Derselbe
-  Binary läuft damit unverändert auf dem eigenen Rechner oder z. B. einem
+- **Rust gateway**: `SECUREPIPE_TCP_BIND` and `SECUREPIPE_HTTP_BIND` as
+  environment variables instead of hardcoded constants in `main.rs`. The same
+  binary therefore runs unchanged on your own machine or e.g. on a
   Raspberry Pi.
-- **ESP32-Firmware**: WLAN-Zugangsdaten, Gateway-Host/-Port und Device-ID
-  werden nicht mehr einkompiliert, sondern über ein WiFiManager-Captive-
-  Portal zur Laufzeit eingegeben und in Flash (NVS) gespeichert. Ein
-  Wechsel des Zielsystems (eigener Rechner ↔ Raspberry Pi) erfordert damit
-  kein Neuflashen mehr. Siehe `arduino/esp32_sender/esp32_sender.ino` und
+- **ESP32 firmware**: WiFi credentials, gateway host/port and device ID
+  are no longer compiled in, but entered via a WiFiManager captive
+  portal at runtime and stored in flash (NVS). Switching the target
+  system (your own machine ↔ Raspberry Pi) therefore no longer requires
+  reflashing. See `arduino/esp32_sender/esp32_sender.ino` and
   `docs/CONFIGURATION.md`.
 
 ## Tests
 
-- Neuer Unit-Test für die Payload-Größenprüfung
+- New unit test for the payload size check
   (`parse_rejects_oversized_payload_len`).
-- Neue Testsuite für die Geräte-Whitelist (`src/protocol/registry.rs`,
-  6 Tests).
-- Alle bisherigen 34 Unit- und 12 Integrationstests laufen weiterhin grün
-  (46 Tests insgesamt, `cargo test`).
-- Manuell gegen einen laufenden Gateway-Prozess verifiziert: Whitelist
-  blockiert unbekannte Geräte korrekt, Env-Var-Konfiguration wirkt ohne
-  Neukompilieren, Replay-Erkennung funktioniert im Normalbetrieb weiterhin.
+- New test suite for the device whitelist (`src/protocol/registry.rs`,
+  6 tests).
+- All previous 34 unit and 12 integration tests still pass
+  (46 tests in total, `cargo test`).
+- Manually verified against a running gateway process: whitelist
+  correctly blocks unknown devices, env-var configuration takes effect without
+  recompiling, replay detection still works in normal operation.
 
-## Unverändert (bewusst nicht Teil dieses Durchgangs)
+## Unchanged (deliberately not part of this round)
 
-- Der statische, für alle Geräte gemeinsame AES-Schlüssel ist weiterhin
-  aktiv (`SessionKey::dev_test_key()`). Per-Device-Keys via ECDH bleiben
-  ein offener Punkt für eine spätere Phase - siehe
-  `docs/SECURITY.md#offene-punkte`.
-- HTTP-API-Authentifizierung und CORS-Einschränkung wurden in diesem
-  Durchgang nicht umgesetzt (waren nicht Teil der ausgewählten Features).
+- The static AES key shared by all devices is still
+  active (`SessionKey::dev_test_key()`). Per-device keys via ECDH remain
+  an open item for a later phase - see
+  `docs/SECURITY.md#open-items`.
+- HTTP API authentication and CORS restriction were not implemented in
+  this round (they were not part of the selected features).

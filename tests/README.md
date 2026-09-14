@@ -1,61 +1,61 @@
-# SecurePipe — Testsuite
+# SecurePipe — Test suite
 
-Diese Testsuite läuft vollständig auf dem Entwicklungsrechner, ganz ohne
-Arduino, ESP32 oder Raspberry Pi. Sie prüft die gesamte Protokolllogik
-isoliert: Frame-Parsing, AES-GCM-Verschlüsselung, und Replay-Schutz.
+This test suite runs entirely on the development machine, without any
+Arduino, ESP32 or Raspberry Pi. It verifies the entire protocol logic
+in isolation: frame parsing, AES-GCM encryption, and replay protection.
 
-## Ausführen
+## Running
 
 ```bash
-# Alle Tests (Unit- + Integrationstests)
+# All tests (unit + integration tests)
 cargo test
 
-# Nur die Unit-Tests in den einzelnen Modulen
+# Only the unit tests in the individual modules
 cargo test --lib
 
-# Nur die Integrationstests (vollständiger Frame-Lebenszyklus)
+# Only the integration tests (full frame lifecycle)
 cargo test --test integration
 
-# Mit Ausgabe, auch bei erfolgreichen Tests
+# With output, even when tests pass
 cargo test -- --nocapture
 
-# Einen einzelnen Test gezielt ausführen
+# Run a single test specifically
 cargo test replay_attack_is_detected_and_rejected
 ```
 
-## Was getestet wird
+## What is tested
 
-### Unit-Tests (`src/protocol/frame.rs`, `src/protocol/replay.rs`, `src/crypto/aes_gcm.rs`)
+### Unit tests (`src/protocol/frame.rs`, `src/protocol/replay.rs`, `src/crypto/aes_gcm.rs`)
 
-Jedes Modul prüft sich selbst isoliert — der CRC-16-Algorithmus gegen einen
-bekannten Testvektor, der Frame-Parser gegen kaputte Magic-Bytes und
-abgeschnittene Frames, der ReplayGuard gegen wiederholte Sequenznummern und
-Nonces, AES-GCM gegen falsche Schlüssel und manipulierte Chiffrate.
+Each module verifies itself in isolation — the CRC-16 algorithm against a
+known test vector, the frame parser against broken magic bytes and
+truncated frames, the ReplayGuard against repeated sequence numbers and
+nonces, AES-GCM against wrong keys and manipulated ciphertexts.
 
-### Integrationstests (`tests/integration.rs`)
+### Integration tests (`tests/integration.rs`)
 
-Hier läuft der **vollständige Pfad** genau so, wie ihn der Rust-Gateway in
-Produktion durchläuft: Frame parsen → Auth-Tag verifizieren → Replay prüfen
-→ entschlüsseln → Payload parsen. Das ist der eigentliche Beweis, dass das
-Protokoll als Ganzes funktioniert — nicht nur seine Einzelteile.
+Here the **complete path** runs exactly the way the Rust gateway processes
+it in production: parse frame → verify auth tag → check replay
+→ decrypt → parse payload. This is the actual proof that the
+protocol works as a whole — not just its individual parts.
 
-Der wichtigste Test ist `replay_attack_is_detected_and_rejected` — er baut
-fünf legitime Frames, lässt sie normal durchlaufen, und spielt dann Frame #1
-erneut ein. Das ist exakt das Szenario, das du auch live in der Demo mit
-dem Simulator zeigst (`cargo run --bin simulator replay`) — nur hier
-automatisiert und reproduzierbar.
+The most important test is `replay_attack_is_detected_and_rejected` — it builds
+five legitimate frames, lets them pass normally, and then replays frame #1.
+This is exactly the scenario you also demonstrate live in the demo with
+the simulator (`cargo run --bin simulator replay`) — only here
+automated and reproducible.
 
-## Warum das für die Präsentation wichtig ist
+## Why this matters for the presentation
 
-Eine Testsuite, die Angriffe als Testfälle modelliert, ist ein starkes
-Argument in der Bewertung: Du zeigst nicht nur, dass das System unter
-Normalbedingungen funktioniert, sondern dass du dir die Bedrohungsmodelle
-bewusst gemacht und gezielt dagegen getestet hast. Das ist der Unterschied
-zwischen „es funktioniert" und „ich kann beweisen, warum es sicher ist".
+A test suite that models attacks as test cases is a strong
+argument in the assessment: you don't just show that the system works
+under normal conditions, but that you consciously considered the threat
+models and tested specifically against them. That is the difference
+between "it works" and "I can prove why it is safe".
 
-## Erwartete Laufzeit
+## Expected runtime
 
-Alle Tests zusammen laufen in unter einer Sekunde — es wird keine Hardware,
-kein Netzwerk und keine Datenbank angesprochen. Das ist beabsichtigt: Die
-Protokoll-Kernlogik ist vollständig von Transport und Persistenz entkoppelt
-(siehe die Architektur-Diskussion zu Transport-Agnostizität).
+All tests together run in under a second — no hardware, no network and no
+database is touched. This is intentional: the protocol core logic is
+completely decoupled from transport and persistence
+(see the architecture discussion on transport agnosticism).

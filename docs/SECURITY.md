@@ -1,102 +1,98 @@
-# Security-Modell von SecurePipe
+# SecurePipe Security Model
 
-Dieses Dokument beschreibt, was SecurePipe gegen wen schützt, was in diesem
-Review-Durchgang gefixt wurde, und was bewusst noch offen ist.
+This document describes what SecurePipe protects and against whom, what was
+fixed in this review round, and what is deliberately still open.
 
-## Bedrohungsmodell in Kürze
+## Threat model in brief
 
-Ein Angreifer sitzt irgendwo zwischen ESP32 und Gateway (gleiches WLAN,
-kompromittierter Router, o. ä.) und kann Pakete mitlesen, fälschen,
-wiederholt einspielen oder beliebig viele eigene TCP-Verbindungen öffnen.
-Er kennt **nicht** den AES-Schlüssel (der wird nur zwischen Firmware und
-Gateway geteilt, nie über die Leitung übertragen).
+An attacker sits somewhere between the ESP32 and the gateway (same WiFi,
+compromised router, or similar) and can read, forge, replay or open
+arbitrarily many of your own TCP connections. He does **not** know the AES key
+(it is only shared between the firmware and the gateway, never transmitted
+over the wire).
 
-## Bereits vorhandene Schutzmechanismen (unverändert gut)
+## Existing protection mechanisms (unchanged, good)
 
-- **AES-256-GCM (authenticated encryption)**: Payload *und* Header sind
-  über AAD geschützt - eine Manipulation an irgendeiner Stelle des Frames
-  lässt die Auth-Tag-Prüfung fehlschlagen.
-- **Drei-Wege-Replay-Schutz**: aufsteigende Sequenznummer pro Gerät,
-  Zeitstempel-Fenster (`MAX_FRAME_AGE_SECS = 30s`), Nonce-Cache.
-- **Auth-Tag-Prüfung vor jeder weiteren Verarbeitung**: Es wird nie auf
-  unauthentifizierten Daten gearbeitet, bevor der Tag geprüft wurde.
+- **AES-256-GCM (authenticated encryption)**: Payload *and* header are
+  protected via AAD - any tampering with any part of the frame
+  causes the auth-tag check to fail.
+- **Three-way replay protection**: increasing sequence number per device,
+  timestamp window (`MAX_FRAME_AGE_SECS = 30s`), nonce cache.
+- **Auth-tag check before any further processing**: Never work on
+  unauthenticated data before the tag has been verified.
 
-## In diesem Durchgang gefixt
+## Fixed in this round
 
-### 1. Speicher-Erschöpfungs-Angriff (Memory-Exhaustion DoS)
+### 1. Memory-exhaustion attack (memory-exhaustion DoS)
 
-**Vorher**: Die Payload-Länge im Frame-Header ist ein vom Angreifer
-kontrolliertes, zu diesem Zeitpunkt noch unauthentifiziertes `u32`-Feld.
-Der Gateway hat direkt `vec![0u8; payload_len + AUTH_TAG_SIZE]` alloziert -
-mit einer präparierten Längenangabe nahe `u32::MAX` wäre das ein Buffer im
-Gigabyte-Bereich gewesen, pro einzelnem Frame, ganz ohne gültige
-Verschlüsselung.
+**Before**: The payload length in the frame header is a `u32` field controlled
+by the attacker and still unauthenticated at that point. The gateway directly
+allocated `vec![0u8; payload_len + AUTH_TAG_SIZE]` - with a prepared length
+near `u32::MAX` that would have been a buffer in the gigabyte range,
+per single frame, entirely without valid encryption.
 
-**Fix**: `MAX_PAYLOAD_SIZE = 512` Byte (großzügiger Puffer über den
-tatsächlich benötigten 8 Byte) wird geprüft, *bevor* irgendein Buffer für
-die Payload alloziert wird - sowohl direkt beim Lesen vom Socket
-(`transport/tcp.rs`) als auch defensiv nochmal in `SecurePipeFrame::parse`
-für jeden anderen Aufrufer.
+**Fix**: `MAX_PAYLOAD_SIZE = 512` bytes (generous headroom over the
+8 bytes actually needed) is checked *before* any buffer for the payload is
+allocated - both directly when reading from the socket
+(`transport/tcp.rs`) and defensively again in `SecurePipeFrame::parse`
+for every other caller.
 
-### 2. Replay-Schutz, der Reconnects überlebt
+### 2. Replay protection that survives reconnects
 
-**Vorher**: `ReplayGuard::new()` wurde pro TCP-Verbindung neu erzeugt. Da
-ESP32-Geräte über WLAN öfter mal kurz die Verbindung verlieren, hätte jeder
-Reconnect die Sequenznummer-Historie und den Nonce-Cache gelöscht - ein
-Angreifer, der eine alte, mitgeschnittene Nachricht direkt nach einem
-(echten oder erzwungenen) Reconnect einspielt, wäre durchgekommen.
+**Before**: `ReplayGuard::new()` was recreated per TCP connection. Since
+ESP32 devices over WiFi occasionally lose the connection for a short time,
+every reconnect would have cleared the sequence-number history and the
+nonce cache - an attacker replaying an old, recorded message directly after a
+(real or forced) reconnect would have gotten through.
 
-**Fix**: Der `ReplayGuard` liegt jetzt einmal, geteilt über alle
-Verbindungen, hinter einem `Mutex` im `GatewayState` - weiterhin intern
-`HashMap<device_id, DeviceState>`, also pro Gerät unabhängig, aber über die
-gesamte Prozess-Laufzeit hinweg bestehend statt pro Connection.
+**Fix**: The `ReplayGuard` now lives once, shared across all
+connections, behind a `Mutex` in the `GatewayState` - still internally
+`HashMap<device_id, DeviceState>`, i.e. independent per device, but
+persisting across the entire process lifetime instead of per connection.
 
-### 3. Geräte-Whitelist
+### 3. Device whitelist
 
-**Neu**: `SECUREPIPE_ALLOWED_DEVICES` (Env-Var, siehe
-[`CONFIGURATION.md`](CONFIGURATION.md)) schränkt ein, welche `device_id`s
-überhaupt akzeptiert werden. Geprüft *nach* der Auth-Tag-Verifikation
-(nie auf unauthentifizierten Daten reagieren) aber *vor* dem Replay-Check
-(ein unbekanntes Gerät bekommt gar nicht erst einen Eintrag im
-Replay-Zustand).
+**New**: `SECUREPIPE_ALLOWED_DEVICES` (env var, see
+[`CONFIGURATION.md`](CONFIGURATION.md)) restricts which `device_id`s
+are accepted at all. Checked *after* auth-tag verification
+(never react to unauthenticated data) but *before* the replay check
+(an unknown device doesn't even get an entry in the replay state).
 
-Wichtig zu verstehen: Das ist **Defense-in-Depth, keine
-Zugriffskontrolle im eigentlichen Sinne**. Da nach wie vor alle Geräte
-denselben statischen Schlüssel teilen (siehe unten), kann jeder, der diesen
-Schlüssel kennt, auch weiterhin gültig aussehende Frames für eine beliebige
-`device_id` erzeugen. Die Whitelist schützt vor falschen/unbekannten
-Device-IDs (Tippfehler, nicht provisionierte Testgeräte, Streuverkehr),
-nicht vor einem Angreifer, der den Schlüssel bereits hat.
+Important to understand: This is **defense-in-depth, not
+access control in the strict sense**. Since all devices still share
+the same static key (see below), anyone who knows this key can
+still generate valid-looking frames for any `device_id`. The whitelist
+protects against wrong/unknown device IDs (typos, unprovisioned test
+devices, stray traffic), not against an attacker who already has the key.
 
-## Unabhängiger Bugfix: `decrypt_payload`
+## Independent bugfix: `decrypt_payload`
 
-Beim Testen ist aufgefallen, dass `decrypt_payload` (`crypto/aes_gcm.rs`)
-den entschlüsselten Buffer nicht auf die tatsächliche Klartextlänge
-gekürzt hat - `ring::open_in_place` gibt eine Slice-Referenz mit der
-korrekten (kürzeren) Länge zurück, verändert aber nicht die Länge des
-übergebenen `Vec` selbst. Der Code hat trotzdem den vollen (längeren)
-`Vec` zurückgegeben, der am Ende noch die jetzt bedeutungslosen
-Auth-Tag-Bytes enthielt. In der Praxis nie aufgefallen, weil
-`SensorPayload::parse` ohnehin nur die ersten 8 Byte liest - aber ein
-bestehender Unit-Test (`encrypt_then_decrypt_roundtrip`) hat es beim
-Kompilieren mit einer aktuelleren `ring`-Version aufgedeckt. Jetzt behoben.
+While testing, it became apparent that `decrypt_payload` (`crypto/aes_gcm.rs`)
+did not trim the decrypted buffer to the actual plaintext length -
+`ring::open_in_place` returns a slice reference with the correct (shorter)
+length, but does not change the length of the passed `Vec` itself. The code
+still returned the full (longer) `Vec`, which still contained the now
+meaningless auth-tag bytes at the end. Never noticed in practice because
+`SensorPayload::parse` only reads the first 8 bytes anyway - but an
+existing unit test (`encrypt_then_decrypt_roundtrip`) uncovered it when
+compiling with a more recent `ring` version. Now fixed.
 
-## Offene Punkte
+## Open Items
 
-Bewusst **nicht** Teil dieses Durchgangs, aber weiterhin dokumentierte
-bekannte Lücken:
+Deliberately **not** part of this round, but documented known gaps
+that continue to exist:
 
-- **Gemeinsamer statischer AES-Schlüssel für alle Geräte**
-  (`SessionKey::dev_test_key()`). Das größte verbleibende Sicherheitsrisiko:
-  wer den Schlüssel kennt, kann jede beliebige `device_id` fälschen. Geplant
-  für eine spätere Phase: ECDH-Schlüsselaustausch beim Verbindungsaufbau,
-  ein individueller Schlüssel pro Gerät.
-- **Keine Authentifizierung auf der HTTP-Dashboard-API**, dazu
-  `CorsLayer::permissive()` - jede Website könnte die Live-Sensordaten und
-  Security-Events auslesen. Für ein lokales Demo-Setup unkritisch, für
-  einen Betrieb außerhalb des eigenen Netzes nicht.
-- **Kein Read-Timeout auf TCP-Verbindungen** - ein Client, der nach dem
-  Header nie weiterschickt, blockiert seine Connection-Task unbegrenzt.
-- **Kein Resync nach ungültigen Magic-Bytes** - bei echtem Bitfehler auf
-  der Leitung kann die Verbindung dauerhaft aus dem Takt geraten, statt
-  gezielt nach dem nächsten Frame-Anfang zu suchen.
+- **Shared static AES key for all devices**
+  (`SessionKey::dev_test_key()`). The biggest remaining security risk:
+  whoever knows the key can forge any `device_id`. Planned for a later
+  phase: ECDH key exchange at connection setup, an individual key per
+  device.
+- **No authentication on the HTTP dashboard API**, plus
+  `CorsLayer::permissive()` - any website could read the live sensor data and
+  security events. Non-critical for a local demo setup, not acceptable for
+  operation outside your own network.
+- **No read timeout on TCP connections** - a client that never sends
+  anything after the header blocks its connection task indefinitely.
+- **No resync after invalid magic bytes** - with a real bit error on
+  the line, the connection can permanently fall out of sync, instead of
+  deliberately searching for the next frame start.
